@@ -14,10 +14,13 @@ kubectl capybara startup payments-7f9c # why does it take 40s to become Ready?
 
 ![doctor overview](docs/screens/overview.png)
 
-<details><summary>More screens: pod detail, network, nodes, DNS</summary>
+<details><summary>More screens: pods, pod detail, connection detail, network, rightsizing, nodes, DNS</summary>
 
+![pods](docs/screens/pods.png)
 ![pod detail](docs/screens/pod-detail.png)
+![connection detail](docs/screens/edge-detail.png)
 ![network](docs/screens/network.png)
+![rightsizing](docs/screens/cost.png)
 ![nodes](docs/screens/nodes.png)
 ![dns](docs/screens/dns.png)
 
@@ -41,6 +44,12 @@ HTML frames; any headless browser turns them into PNGs).
 | HTTP errors/latency? | `http` | HTTP/1.x rate, errors, latency per route without sidecars (opt-in `--l7`) |
 | Is anything shady going on? | `security` | Interactive `kubectl exec` sessions, shells spawned by app processes, undeclared listening ports, internet egress |
 | What does cross-AZ traffic cost? | `cost` | Bytes per workload pair across zones × price |
+| Are my requests right? | `rightsize` | Measured CPU (5s samples) and memory peaks vs requests/limits per workload, recommendations and $/month |
+| Will it OOM soon? | `oom` | Linear trend of pod memory towards its limit: "limit in ~12m" |
+| Is a Service balanced? | `services` | Connection/byte share of every backend (long-lived connections pinning one pod) |
+| Which node has a bad network? | `nodes` | Node-to-node RTT matrix with slow-node detection |
+| What is the firewall blocking? | `security`, `doctor` | NetworkPolicy/iptables/tc drops attributed to pod pairs |
+| Is the server keeping up? | `pod`, `doctor` | Accept queue overflows, zero-window stalls, receive queue drops per pod |
 | Who hammers the API server? | `doctor` | Connections/bytes from each workload to the `kubernetes` Service |
 | Where is the CPU going? | `profile <pod>` | On-demand, cgroup-filtered CPU sampling with symbolization (kernel, ELF, Go pclntab); folded stacks for flame graphs |
 | What NetworkPolicy do I need? | `netpol deploy/x` | Generates a policy allowing exactly the observed ingress/egress (+ DNS) |

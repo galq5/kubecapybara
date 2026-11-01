@@ -88,17 +88,8 @@ func Doctor(w io.Writer, st Style, findings []analysis.Finding, f Filter) {
 
 // Edges prints the pod-to-pod network table.
 func Edges(w io.Writer, st Style, v *analysis.View, f Filter, sortBy string, limit int) {
-	edges := make([]*analysis.Edge, 0, len(v.Edges))
-	for _, e := range v.Edges {
-		if !(f.ns(e.Client) || f.ns(e.Server)) {
-			continue
-		}
-		if !f.match(e.Client.Display(), e.Server.Display(), fmt.Sprint(e.Port), e.Client.Workload, e.Server.Workload) {
-			continue
-		}
-		edges = append(edges, e)
-	}
-	sortEdges(edges, sortBy)
+	edges := FilterEdges(v, f)
+	SortEdges(edges, sortBy)
 	t := &Table{
 		Headers: []string{"CLIENT", "SERVER", "PORT", "RTT p50", "RTT p99", "CONN p99", "CONN/s", "TX/s", "RX/s", "RETR/s", "REFUSED", "TIMEOUT", "SEEN"},
 		Right:   map[int]bool{2: true, 3: true, 4: true, 5: true, 6: true, 7: true, 8: true, 9: true, 10: true, 11: true},
@@ -136,7 +127,23 @@ func Edges(w io.Writer, st Style, v *analysis.View, f Filter, sortBy string, lim
 	}
 }
 
-func sortEdges(edges []*analysis.Edge, by string) {
+// FilterEdges returns the edges matching a filter.
+func FilterEdges(v *analysis.View, f Filter) []*analysis.Edge {
+	edges := make([]*analysis.Edge, 0, len(v.Edges))
+	for _, e := range v.Edges {
+		if !(f.ns(e.Client) || f.ns(e.Server)) {
+			continue
+		}
+		if !f.match(e.Client.Display(), e.Server.Display(), fmt.Sprint(e.Port), e.Client.Workload, e.Server.Workload) {
+			continue
+		}
+		edges = append(edges, e)
+	}
+	return edges
+}
+
+// SortEdges sorts edges by traffic, rtt, connect, errors, retrans, bytes or conns.
+func SortEdges(edges []*analysis.Edge, by string) {
 	key := func(e *analysis.Edge) float64 {
 		s := e.Stats
 		switch by {

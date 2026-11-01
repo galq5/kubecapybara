@@ -49,23 +49,28 @@ func main() {
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		fail(err)
 	}
-	shots := []struct {
-		name string
-		tab  int
-		pod  string
-	}{
-		{"overview", 0, ""}, {"network", 1, ""}, {"pods", 2, ""}, {"dns", 3, ""},
-		{"http", 4, ""}, {"nodes", 5, ""}, {"events", 6, ""}, {"security", 7, ""},
+	type shot struct {
+		name, tab, detail string
+	}
+	shots := []shot{
+		{"overview", "Overview", ""}, {"network", "Network", ""}, {"pods", "Pods", ""}, {"services", "Services", ""},
+		{"dns", "DNS", ""}, {"http", "HTTP", ""}, {"nodes", "Nodes", ""}, {"events", "Events", ""},
+		{"security", "Security", ""}, {"cost", "Cost", ""},
 	}
 	if *pod != "" {
-		shots = append(shots, struct {
-			name string
-			tab  int
-			pod  string
-		}{"pod-detail", 2, *pod})
+		shots = append(shots, shot{"pod-detail", "Pods", *pod})
+	}
+	if len(v.Edges) > 0 {
+		// the busiest pod-to-pod edge
+		for _, e := range v.Edges {
+			if e.Client.Kind == analysis.KindPod && e.Server.Kind == analysis.KindPod {
+				shots = append(shots, shot{"edge-detail", "Network", tui.EdgeKey(e)})
+				break
+			}
+		}
 	}
 	for _, s := range shots {
-		frame := tui.Frame(res, opts, *width, *height, s.tab, s.pod)
+		frame := tui.Frame(res, opts, *width, *height, tui.TabIndex(s.tab), s.detail)
 		path := filepath.Join(*out, s.name+".html")
 		if err := os.WriteFile(path, []byte(page(frame)), 0o644); err != nil {
 			fail(err)
