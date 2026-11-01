@@ -159,7 +159,11 @@ func (c *httpCollector) handleDB(ev *bpf.HttpHttpEvent) {
 	if !ok {
 		return
 	}
-	query := ParseDBRequest(ev.Proto, cbytes(ev.Req[:]))
+	req := cbytes(ev.Req[:])
+	if int(ev.Off) < len(req) {
+		req = req[ev.Off:] // a coalesced frame later in the captured write
+	}
+	query := ParseDBRequest(ev.Proto, req)
 	if query == "" {
 		return // not a request after all (e.g. a Redis server's reply)
 	}
@@ -192,6 +196,12 @@ func (c *httpCollector) handleDB(ev *bpf.HttpHttpEvent) {
 	q.Lat.Observe(latUs)
 	if failed {
 		q.Errors++
+		if kind := DBErrorKind(ev.Proto, cbytes(ev.Resp[:])); kind != "" {
+			if q.ErrorKinds == nil {
+				q.ErrorKinds = map[string]uint64{}
+			}
+			q.ErrorKinds[kind]++
+		}
 	}
 }
 

@@ -31,6 +31,18 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #define PROTO_POSTGRES 2
 #define PROTO_REDIS 3
 #define PROTO_MYSQL 4
+#define PROTO_CASSANDRA 5 /* CQL native protocol v3-v5 frames, matched by stream id */
+#define PROTO_KAFKA 6     /* matched by correlation id */
+#define PROTO_MONGO 7     /* OP_MSG, matched by requestID/responseTo */
+#define PROTO_MEMCACHED 8 /* text protocol, sequential */
+
+/* requests of multiplexed protocols, keyed by their request id */
+struct mux_key {
+	__u32 tgid;
+	__u32 fd;
+	__u32 id;
+	__u32 proto;
+};
 
 /* layout shared by syscalls:sys_enter_* tracepoints: args start at offset 16 */
 struct sys_enter_ctx {
@@ -60,7 +72,8 @@ struct pending_req {
 	__u64 ts;
 	__u8 role;
 	__u8 proto;
-	__u8 _pad[6];
+	__u8 off; /* offset of the request inside req[] (coalesced CQL frames) */
+	__u8 _pad[5];
 	char req[REQ_MAX];
 };
 
@@ -71,7 +84,8 @@ struct http_event {
 	__u32 pid;
 	__u8 role;
 	__u8 proto;
-	__u8 _pad[2];
+	__u8 off;
+	__u8 _pad;
 	char req[REQ_MAX];
 	char resp[RESP_MAX];
 };
@@ -96,6 +110,13 @@ struct {
 	__type(key, __u32);
 	__type(value, struct pending_req);
 } scratch SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 32768);
+	__type(key, struct mux_key);
+	__type(value, struct pending_req);
+} pending_mux SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -148,6 +169,46 @@ static __always_inline __u8 db_proto(const char *b, __s64 len)
 	plen = (__u32)b0 | ((__u32)b1 << 8) | ((__u32)b2 << 16);
 	if (b3 == 0 && b4 == 0x03 && plen >= 1 && (__s64)plen + 4 == len)
 		return PROTO_MYSQL;
+	/* Memcached text protocol */
+	if ((b0 == 'g' && b1 == 'e' && b2 == 't') || (b0 == 's' && b1 == 'e' && b2 == 't' && b3 == ' ') ||
+	    (b0 == 'a' && b1 == 'd' && b2 == 'd' && b3 == ' ') || (b0 == 'd' && b1 == 'e' && b2 == 'l' && b3 == 'e') ||
+	    (b0 == 'i' && b1 == 'n' && b2 == 'c' && b3 == 'r') || (b0 == 'd' && b1 == 'e' && b2 == 'c' && b3 == 'r') ||
+	    (b0 == 't' && b1 == 'o' && b2 == 'u' && b3 == 'c') || (b0 == 'c' && b1 == 'a' && b2 == 's' && b3 == ' '))
+		return PROTO_MEMCACHED;
+	return 0;
+}
+
+static __always_inline __u32 be32(const char *b)
+{
+	return ((__u32)(__u8)b[0] << 24) | ((__u32)(__u8)b[1] << 16) | ((__u32)(__u8)b[2] << 8) | (__u8)b[3];
+}
+
+static __always_inline __u32 le32(const char *b)
+{
+	return ((__u32)(__u8)b[3] << 24) | ((__u32)(__u8)b[2] << 16) | ((__u32)(__u8)b[1] << 8) | (__u8)b[0];
+}
+
+/* multiplexed protocol requests: returns the protocol and sets *id */
+static __always_inline __u8 mux_request(const char *b, __s64 len, __u32 *id)
+{
+	__u8 b0 = b[0], op = b[4];
+
+	/* CQL: version 3-5 request, opcode QUERY/PREPARE/EXECUTE/BATCH, body length fits */
+	if (b0 >= 3 && b0 <= 5 && (op == 0x07 || op == 0x09 || op == 0x0A || op == 0x0D) &&
+	    (__s64)be32(b + 5) + 9 <= len) {
+		*id = ((__u32)(__u8)b[2] << 8) | (__u8)b[3];
+		return PROTO_CASSANDRA;
+	}
+	/* MongoDB OP_MSG: messageLength == write size, responseTo 0, opCode 2013 */
+	if ((__s64)le32(b) == len && le32(b + 8) == 0 && le32(b + 12) == 2013) {
+		*id = le32(b + 4);
+		return PROTO_MONGO;
+	}
+	/* Kafka: size == write - 4, sane api key and version */
+	if ((__s64)be32(b) + 4 == len && b[4] == 0 && (__u8)b[5] <= 80 && b[6] == 0 && (__u8)b[7] <= 20) {
+		*id = be32(b + 8);
+		return PROTO_KAFKA;
+	}
 	return 0;
 }
 
@@ -163,6 +224,7 @@ static __always_inline void emit(struct pending_req *p, struct pending_req *resp
 	ev->pid = tgid;
 	ev->role = p->role;
 	ev->proto = p->proto;
+	ev->off = p->off;
 	__builtin_memcpy(ev->req, p->req, REQ_MAX);
 	__builtin_memcpy(ev->resp, resp->req, RESP_MAX);
 	bpf_ringbuf_submit(ev, 0);
@@ -210,8 +272,45 @@ static __always_inline void on_data(__u32 fd, __u64 buf, __s64 len, int is_read)
 		return;
 	}
 	if (!is_read) {
-		__u8 proto = db_proto(req->req, len);
+		__u32 id = 0;
+		__u8 proto = mux_request(req->req, len, &id);
 
+		if (proto) {
+			struct mux_key mk = { .tgid = key.tgid, .fd = fd, .id = id, .proto = proto };
+
+			req->ts = bpf_ktime_get_ns();
+			req->role = ROLE_CLIENT;
+			req->proto = proto;
+			req->off = 0;
+			bpf_map_update_elem(&pending_mux, &mk, req, BPF_ANY);
+			if (proto == PROTO_CASSANDRA) {
+				/* drivers coalesce frames: register the following ones that
+				 * start inside the captured bytes too */
+				__u32 off = 0, plen = be32(req->req + 5);
+				int i;
+
+				for (i = 0; i < 3; i++) {
+					char *f;
+
+					if (plen > REQ_MAX)
+						break;
+					off += 9 + plen;
+					if (off > REQ_MAX - 9)
+						break;
+					f = req->req + (off & 0x7f);
+					if (off + 9 > REQ_MAX || ((__u8)f[0] < 3 || (__u8)f[0] > 5))
+						break;
+					plen = be32(f + 5);
+					if (plen > 0xffffff)
+						break;
+					mk.id = ((__u32)(__u8)f[2] << 8) | (__u8)f[3];
+					req->off = off;
+					bpf_map_update_elem(&pending_mux, &mk, req, BPF_ANY);
+				}
+			}
+			return;
+		}
+		proto = db_proto(req->req, len);
 		if (proto) {
 			req->ts = bpf_ktime_get_ns();
 			req->role = ROLE_CLIENT;
@@ -220,14 +319,37 @@ static __always_inline void on_data(__u32 fd, __u64 buf, __s64 len, int is_read)
 		}
 		return;
 	}
-	/* first bytes read after a database request: the reply */
+	/* first bytes read after a sequential database request: the reply */
 	{
 		struct pending_req *p = bpf_map_lookup_elem(&pending, &key);
 
-		if (!p || p->proto == PROTO_HTTP)
+		if (p && p->proto != PROTO_HTTP) {
+			emit(p, req, key.tgid);
+			bpf_map_delete_elem(&pending, &key);
+			return;
+		}
+	}
+	/* replies of multiplexed protocols: try each header layout */
+	{
+		struct mux_key mk = { .tgid = key.tgid, .fd = fd };
+		struct pending_req *p;
+		const char *b = req->req;
+
+		if (((__u8)b[0] & 0x80) && ((__u8)b[0] & 0x7f) >= 3 && ((__u8)b[0] & 0x7f) <= 5) {
+			mk.proto = PROTO_CASSANDRA;
+			mk.id = ((__u32)(__u8)b[2] << 8) | (__u8)b[3];
+		} else if (le32(b + 12) == 2013 || le32(b + 12) == 1) {
+			mk.proto = PROTO_MONGO;
+			mk.id = le32(b + 8);
+		} else {
+			mk.proto = PROTO_KAFKA;
+			mk.id = be32(b + 4);
+		}
+		p = bpf_map_lookup_elem(&pending_mux, &mk);
+		if (!p)
 			return;
 		emit(p, req, key.tgid);
-		bpf_map_delete_elem(&pending, &key);
+		bpf_map_delete_elem(&pending_mux, &mk);
 	}
 }
 

@@ -147,6 +147,9 @@ type DBQuery struct {
 	Count  uint64 `json:"count"`
 	Errors uint64 `json:"errors,omitempty"`
 	Lat    Hist   `json:"lat"`
+	// ErrorKinds counts errors by protocol error name (e.g. Cassandra
+	// ReadTimeout, Unavailable, Overloaded) when the protocol reports one.
+	ErrorKinds map[string]uint64 `json:"errorKinds,omitempty"`
 }
 
 // Merge adds o into q.
@@ -154,6 +157,12 @@ func (q *DBQuery) Merge(o *DBQuery) {
 	q.Count += o.Count
 	q.Errors += o.Errors
 	q.Lat.Add(o.Lat)
+	for k, v := range o.ErrorKinds {
+		if q.ErrorKinds == nil {
+			q.ErrorKinds = map[string]uint64{}
+		}
+		q.ErrorKinds[k] += v
+	}
 }
 
 // FileStats aggregates slow operations on one file.

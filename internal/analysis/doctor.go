@@ -991,7 +991,15 @@ func ruleDB(v *View) []Finding {
 				continue
 			}
 			if r := ratio(float64(q.Errors), float64(q.Count)); r > 0.01 {
-				errLines = append(errLines, fmt.Sprintf("%s %s: %s errors (%d/%d) %s", e.Endpoint.Display(), q.Proto, Pct(r), q.Errors, q.Count, q.Query))
+				kinds := ""
+				if len(q.ErrorKinds) > 0 {
+					var ks []string
+					for _, k := range model.SortedKeys(q.ErrorKinds) {
+						ks = append(ks, fmt.Sprintf("%s %d", k, q.ErrorKinds[k]))
+					}
+					kinds = " [" + strings.Join(top(ks, 3), ", ") + "]"
+				}
+				errLines = append(errLines, fmt.Sprintf("%s %s: %s errors (%d/%d)%s %s", e.Endpoint.Display(), q.Proto, Pct(r), q.Errors, q.Count, kinds, q.Query))
 				score += r * 10
 			}
 			if p99 := q.Lat.P99(); p99 > 500e3 {

@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -220,5 +221,42 @@ func TestDBParsingEdgeCases(t *testing.T) {
 	ok := []byte{'1', 0, 0, 0, 4, '2', 0, 0, 0, 4, 'C', 0, 0, 0, 0x0d, 'I'}
 	if DBError(protoPostgres, ok) {
 		t.Error("CommandComplete reported as error")
+	}
+}
+
+func TestMoreProtocols(t *testing.T) {
+	q := "SELECT * FROM ks.users WHERE id = 7"
+	cql := append([]byte{4, 0, 0, 5, 0x07, 0, 0, 0, byte(4 + len(q)), 0, 0, 0, byte(len(q))}, q...)
+	if s := ParseDBRequest(protoCQL, cql); s != "SELECT * FROM ks.users WHERE id = ?" {
+		t.Errorf("cql: %q", s)
+	}
+	cqlErr := []byte{0x84, 0, 0, 5, 0x00, 0, 0, 0, 20, 0, 0, 0x12, 0x00}
+	if !DBError(protoCQL, cqlErr) || DBErrorKind(protoCQL, cqlErr) != "ReadTimeout" {
+		t.Errorf("cql error: %v %q", DBError(protoCQL, cqlErr), DBErrorKind(protoCQL, cqlErr))
+	}
+	kafka := []byte{0, 0, 0, 30, 0, 0, 0, 9, 0, 0, 0, 42, 0, 6, 'o', 'r', 'd', 'e', 'r', 's'}
+	if s := ParseDBRequest(protoKafka, kafka); s != "Produce client=orders" {
+		t.Errorf("kafka: %q", s)
+	}
+	// OP_MSG: header, flags, kind 0, doc{ find: "orders" }
+	doc := []byte{0, 0, 0, 0, 0x02, 'f', 'i', 'n', 'd', 0, 7, 0, 0, 0, 'o', 'r', 'd', 'e', 'r', 's', 0}
+	mongo := append(make([]byte, 20), 0)
+	mongo = append(mongo, doc...)
+	if s := ParseDBRequest(protoMongo, mongo); s != "find orders" {
+		t.Errorf("mongo: %q", s)
+	}
+	if s := ParseDBRequest(protoMemcache, []byte("get user:42\r\n")); s != "get" {
+		t.Errorf("memcached: %q", s)
+	}
+	if !DBError(protoMemcache, []byte("SERVER_ERROR out of memory")) || DBError(protoMemcache, []byte("END\r\n")) {
+		t.Error("memcached errors")
+	}
+}
+
+func TestTruncatedStatementsAggregate(t *testing.T) {
+	a := ParseDBRequest(protoPostgres, append([]byte{'Q', 0, 0, 1, 0}, "SELECT * FROM orders WHERE customer = 'alice' AND st"...))
+	b := ParseDBRequest(protoPostgres, append([]byte{'Q', 0, 0, 1, 0}, "SELECT * FROM orders WHERE customer = 'bob' AND stat"...))
+	if a != b || !strings.HasSuffix(a, "…") {
+		t.Fatalf("truncated statements differ: %q vs %q", a, b)
 	}
 }

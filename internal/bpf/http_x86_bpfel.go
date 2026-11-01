@@ -27,9 +27,18 @@ type HttpHttpEvent struct {
 	Pid       uint32
 	Role      uint8
 	Proto     uint8
-	Pad       [2]uint8
+	Off       uint8
+	Pad       uint8
 	Req       [96]int8
 	Resp      [16]int8
+}
+
+type HttpMuxKey struct {
+	_     structs.HostLayout
+	Tgid  uint32
+	Fd    uint32
+	Id    uint32
+	Proto uint32
 }
 
 type HttpPendingReq struct {
@@ -37,7 +46,8 @@ type HttpPendingReq struct {
 	Ts    uint64
 	Role  uint8
 	Proto uint8
-	Pad   [6]uint8
+	Off   uint8
+	Pad   [5]uint8
 	Req   [96]int8
 }
 
@@ -105,6 +115,7 @@ type HttpProgramSpecs struct {
 type HttpMapSpecs struct {
 	HttpEvents *ebpf.MapSpec `ebpf:"http_events"`
 	Pending    *ebpf.MapSpec `ebpf:"pending"`
+	PendingMux *ebpf.MapSpec `ebpf:"pending_mux"`
 	Reads      *ebpf.MapSpec `ebpf:"reads"`
 	Scratch    *ebpf.MapSpec `ebpf:"scratch"`
 }
@@ -138,6 +149,7 @@ func (o *HttpObjects) Close() error {
 type HttpMaps struct {
 	HttpEvents *ebpf.Map `ebpf:"http_events"`
 	Pending    *ebpf.Map `ebpf:"pending"`
+	PendingMux *ebpf.Map `ebpf:"pending_mux"`
 	Reads      *ebpf.Map `ebpf:"reads"`
 	Scratch    *ebpf.Map `ebpf:"scratch"`
 }
@@ -146,6 +158,7 @@ func (m *HttpMaps) Close() error {
 	return _HttpClose(
 		m.HttpEvents,
 		m.Pending,
+		m.PendingMux,
 		m.Reads,
 		m.Scratch,
 	)
