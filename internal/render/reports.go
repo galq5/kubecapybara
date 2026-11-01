@@ -502,7 +502,7 @@ func Nodes(w io.Writer, st Style, v *analysis.View, f Filter) {
 			st.Title("node/"+n.Name), orDash(n.Zone), n.Stats.Load1, n.Stats.CPUs, r.CPUCores, n.Stats.PSICPU, n.Stats.PSIMem, n.Stats.PSIIO)
 		fmt.Fprintf(w, "  conntrack %s  insert_failed %d  drops %d  retransmits %s/s  disk %s/s\n",
 			ct, n.Stats.ConntrackInsertFailed, r.Drops, analysis.Rate(v.PerSec(r.Retrans)), analysis.Bytes(v.PerSec(r.DiskBytes)))
-		t := &Table{Headers: []string{"  WORKLOAD", "CPU", "RUNQ p99", "WAITS FOR CPU", "STEALS CPU FROM OTHERS", "DISK/s", "DISK p99", "NET/s"},
+		t := &Table{Headers: []string{"  WORKLOAD", "CPU", "RUNQ p99", "WAITING FOR CPU", "DELAY CAUSED TO OTHERS", "DISK/s", "DISK p99", "NET/s"},
 			Right: map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true}, MaxCol: 50}
 		shown := 0
 		for _, e := range r.Entities {
@@ -514,7 +514,7 @@ func Nodes(w io.Writer, st Style, v *analysis.View, f Filter) {
 			}
 			shown++
 			wait := analysis.Pct(e.RunQShare)
-			if e.RunQShare > 0.1 {
+			if e.RunQShare > 0.2 {
 				wait = st.Warn(wait)
 			}
 			t.AddRow("  "+e.Endpoint.Display(), fmt.Sprintf("%.3f", e.Cores), analysis.Dur(e.RunQP99), wait,

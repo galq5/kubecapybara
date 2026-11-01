@@ -12,6 +12,20 @@ kubectl capybara why-crash payments-7f9c
 kubectl capybara startup payments-7f9c # why does it take 40s to become Ready?
 ```
 
+![doctor overview](docs/screens/overview.png)
+
+<details><summary>More screens: pod detail, network, nodes, DNS</summary>
+
+![pod detail](docs/screens/pod-detail.png)
+![network](docs/screens/network.png)
+![nodes](docs/screens/nodes.png)
+![dns](docs/screens/dns.png)
+
+</details>
+
+Regenerate with `go run ./hack/screenshot --from-file <bundle.json>` (renders
+HTML frames; any headless browser turns them into PNGs).
+
 ## What it shows
 
 | Question | Command | How it is measured |

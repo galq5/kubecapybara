@@ -419,3 +419,16 @@ Tabs
   Security  interactive exec sessions, shells spawned by apps, undeclared ports, internet egress
   Cost      cross-zone traffic and estimated monthly transfer cost
 `
+
+// Frame renders a single dashboard frame without a terminal (used for
+// screenshots and tests). tab is the tab index; podDetail optionally opens
+// the details of a pod entity on the Pods tab.
+func Frame(res *Result, opts Options, width, height, tab int, podDetail string) string {
+	ti := textinput.New()
+	m := &model{opts: opts, st: render.Style{Color: true}, filter: ti, res: res, updated: time.Now()}
+	m.Update(tea.WindowSizeMsg{Width: width, Height: height})
+	m.tab = tab
+	m.podDetail = podDetail
+	m.refreshContent(true)
+	return m.View()
+}

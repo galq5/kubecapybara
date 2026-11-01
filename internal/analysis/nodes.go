@@ -21,7 +21,7 @@ type NodeEntity struct {
 	Endpoint  Endpoint
 	Cores     float64
 	RunQP99   float64
-	RunQShare float64 // waiting-for-CPU time per on-CPU time
+	RunQShare float64 // share of runnable time spent waiting for a CPU (0..1)
 	Stolen    uint64  // ns of run queue delay this entity caused others
 	DiskBytes uint64
 	DiskP99   float64
@@ -78,7 +78,8 @@ func NodeReports(v *View) []NodeReport {
 			if sc := e.Sched; sc != nil {
 				ne.Cores = float64(sc.OnCPUNs) / 1e9 / v.Seconds()
 				ne.RunQP99 = sc.RunQ.P99()
-				ne.RunQShare = ratio(float64(sc.OffNs[model.StateRunQ]), float64(sc.OnCPUNs))
+				runq := float64(sc.OffNs[model.StateRunQ])
+				ne.RunQShare = ratio(runq, runq+float64(sc.OnCPUNs))
 				ne.Culprits = sc.Culprits
 			}
 			if io := e.IO; io != nil {
