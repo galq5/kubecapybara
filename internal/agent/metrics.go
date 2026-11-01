@@ -131,6 +131,33 @@ func (m *metrics) observe(w *Window) {
 			m.counter("capybara_dns_server_queries_total", "DNS queries answered by this entity.", el, float64(d.Queries), now)
 			m.histogram("capybara_dns_server_latency_seconds", "DNS server processing latency.", el, d.Lat, now)
 		}
+		if sp := e.SIP; sp != nil {
+			for _, ms := range sp.Methods {
+				ml := entityLabels(id, "role", ms.Role, "method", ms.Method)
+				m.counter("capybara_sip_requests_total", "SIP requests (retransmissions excluded).", ml, float64(ms.Requests), now)
+				m.counter("capybara_sip_retransmissions_total", "Retransmitted SIP requests.", ml, float64(ms.Retrans), now)
+				m.counter("capybara_sip_timeouts_total", "SIP transactions without a final response within 32s.", ml, float64(ms.Timeouts), now)
+				for code, n := range ms.Codes {
+					m.counter("capybara_sip_responses_total", "SIP final and ringing responses, by code.", entityLabels(id, "role", ms.Role, "method", ms.Method, "code", code), float64(n), now)
+				}
+				m.histogram("capybara_sip_setup_seconds", "SIP request to final response.", ml, ms.Final, now)
+				if ms.Method == "INVITE" {
+					m.histogram("capybara_sip_post_dial_delay_seconds", "INVITE to 180/183 ringing.", ml, ms.Ringing, now)
+				}
+			}
+			m.gauge("capybara_sip_calls_active", "Established SIP calls.", el, float64(sp.CallsActive), now)
+			m.counter("capybara_sip_call_seconds_total", "Duration of ended SIP calls.", el, float64(sp.CallSeconds), now)
+		}
+		if r := e.RTP; r != nil {
+			m.counter("capybara_rtp_packets_received_total", "Inbound RTP packets.", el, float64(r.PacketsIn), now)
+			m.counter("capybara_rtp_packets_sent_total", "Outbound RTP packets.", el, float64(r.PacketsOut), now)
+			m.counter("capybara_rtp_packets_expected_total", "Inbound RTP packets expected from sequence numbers.", el, float64(r.Expected), now)
+			m.counter("capybara_rtp_packets_lost_total", "Inbound RTP packets lost.", el, float64(r.Lost), now)
+			m.histogram("capybara_rtp_jitter_seconds", "Inbound RTP interarrival jitter (one sample per stream and interval).", el, r.Jitter, now)
+			m.gauge("capybara_rtp_streams", "Active RTP streams.", entityLabels(id, "direction", "in"), float64(r.StreamsIn), now)
+			m.gauge("capybara_rtp_streams", "Active RTP streams.", entityLabels(id, "direction", "out"), float64(r.StreamsOut), now)
+			m.gauge("capybara_rtp_one_way_streams", "Outbound RTP streams whose peer sends nothing back.", el, float64(r.OneWay), now)
+		}
 		for _, ep := range e.HTTP {
 			for class, n := range ep.Status {
 				m.counter("capybara_http_requests_total", "HTTP/1.x requests.", entityLabels(id, "role", ep.Role, "method", ep.Method, "path", ep.Path, "status", class), float64(n), now)

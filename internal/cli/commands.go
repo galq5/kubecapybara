@@ -629,6 +629,21 @@ func (o *options) cmdDB() *cobra.Command {
 	}
 }
 
+func (o *options) cmdVoIP() *cobra.Command {
+	return &cobra.Command{
+		Use:     "voip",
+		Aliases: []string{"sip", "rtp", "calls"},
+		Short:   "SIP calls (answer ratio, failures, post-dial delay) and RTP quality (loss, jitter, one-way audio) per pod (agent --voip)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.VoIP(r.View) }, func(st render.Style, r *tui.Result) error {
+				render.Header(os.Stdout, st, r.View, o.src.Describe())
+				render.VoIP(os.Stdout, st, r.View, o.filt())
+				return nil
+			})
+		},
+	}
+}
+
 func (o *options) cmdFiles() *cobra.Command {
 	return &cobra.Command{
 		Use:   "files",

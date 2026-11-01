@@ -11,3 +11,4 @@ package bpf
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64 -type http_event Http ../../bpf/http.bpf.c -- -I../../bpf/headers -I../../bpf
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64 -type sample_key Profile ../../bpf/profile.bpf.c -- -I../../bpf/headers -I../../bpf
 //go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64 -type file_event Files ../../bpf/files.bpf.c -- -I../../bpf/headers -I../../bpf
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang -cflags "-O2 -g -Wall -Werror" -target amd64 -type sip_event -type rtp_key -type rtp_val Voip ../../bpf/voip.bpf.c -- -I../../bpf/headers -I../../bpf

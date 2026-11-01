@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -37,6 +38,10 @@ func main() {
 	flag.BoolVar(&cfg.EnableL7, "l7", false, "enable HTTP/1.x and plaintext Postgres/MySQL/Redis request tracing (hooks read/write syscalls)")
 	flag.BoolVar(&cfg.EnableFiles, "files", false, "report slow file operations (read/write/fsync on regular files; hooks read/write syscalls)")
 	flag.DurationVar(&cfg.FileThreshold, "file-threshold", 10*time.Millisecond, "minimum duration of a file operation to report")
+	var sipPorts, rtpPorts string
+	flag.BoolVar(&cfg.EnableVoIP, "voip", false, "monitor SIP signalling and RTP media quality (FreeSWITCH, Asterisk, Kamailio...)")
+	flag.StringVar(&sipPorts, "sip-ports", "5060,5080", "SIP ports (UDP/TCP, up to 4)")
+	flag.StringVar(&rtpPorts, "rtp-ports", "16384-32768", "local RTP port range")
 	flag.StringVar(&disable, "disable", "", "comma separated collectors to disable (net,drops,dns,sched,io,proc,cgroupfs,node,profile)")
 	flag.StringVar(&cfg.ClusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster DNS domain")
 	flag.StringVar(&cfg.StateDir, "state-dir", "", "directory to persist history and crash reports across restarts (e.g. /var/lib/capybara)")
@@ -65,6 +70,10 @@ func main() {
 		}
 		cfg.Token = strings.TrimSpace(string(b))
 	}
+	if err := parseVoIPPorts(&cfg, sipPorts, rtpPorts); err != nil {
+		cfg.Log.Error("voip ports", "err", err)
+		os.Exit(1)
+	}
 	cfg.Disable = map[string]bool{}
 	for _, d := range strings.Split(disable, ",") {
 		if d = strings.TrimSpace(d); d != "" {
@@ -90,4 +99,28 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+func parseVoIPPorts(cfg *agent.Config, sip, rtp string) error {
+	for _, p := range strings.Split(sip, ",") {
+		if p = strings.TrimSpace(p); p == "" {
+			continue
+		}
+		n, err := strconv.ParseUint(p, 10, 16)
+		if err != nil || n == 0 {
+			return fmt.Errorf("invalid SIP port %q", p)
+		}
+		cfg.SIPPorts = append(cfg.SIPPorts, uint16(n))
+	}
+	if len(cfg.SIPPorts) > 4 {
+		return fmt.Errorf("at most 4 SIP ports, got %d", len(cfg.SIPPorts))
+	}
+	lo, hi, ok := strings.Cut(rtp, "-")
+	l, err1 := strconv.ParseUint(strings.TrimSpace(lo), 10, 16)
+	h, err2 := strconv.ParseUint(strings.TrimSpace(hi), 10, 16)
+	if !ok || err1 != nil || err2 != nil || l == 0 || l > h {
+		return fmt.Errorf("invalid RTP port range %q (want low-high)", rtp)
+	}
+	cfg.RTPPortLow, cfg.RTPPortHigh = uint16(l), uint16(h)
+	return nil
 }

@@ -31,6 +31,10 @@ type Config struct {
 	EnableL7      bool
 	EnableFiles   bool          // time read/write/fsync on regular files
 	FileThreshold time.Duration // report file operations slower than this
+	EnableVoIP    bool          // SIP signalling and RTP media quality
+	SIPPorts      []uint16      // SIP ports (UDP and TCP), up to 4
+	RTPPortLow    uint16        // RTP port range (local port)
+	RTPPortHigh   uint16
 	Disable       map[string]bool
 	ClusterDomain string
 	Version       string
@@ -133,6 +137,11 @@ func New(cfg Config) (*Agent, error) {
 		a.collectors = append(a.collectors, &filesCollector{})
 	} else {
 		a.setStatus("files", "disabled (enable with --files)")
+	}
+	if cfg.EnableVoIP {
+		a.collectors = append(a.collectors, &voipCollector{})
+	} else {
+		a.setStatus("voip", "disabled (enable with --voip)")
 	}
 	a.log.Info("cgroup v2 root", "path", root)
 	return a, nil

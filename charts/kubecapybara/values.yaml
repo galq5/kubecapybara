@@ -28,6 +28,17 @@ agent:
   files: false
   # -- Report file operations slower than this.
   fileThreshold: 10ms
+  # -- VoIP: SIP signalling (call setup latency, answer ratio, failures) and
+  # RTP media quality (loss, jitter, one-way audio) for FreeSWITCH, Asterisk,
+  # Kamailio, SBCs... Plain SIP over UDP/TCP only (not TLS); RTP loss/jitter
+  # are computed in the kernel per stream, so the cost per media packet is
+  # a map update, not a copy.
+  voip:
+    enabled: false
+    # -- Up to 4 SIP ports (FreeSWITCH: 5060 internal, 5080 external profile).
+    sipPorts: [5060, 5080]
+    # -- Local RTP port range (FreeSWITCH rtp-start-port/rtp-end-port).
+    rtpPorts: 16384-32768
   # -- Collectors to disable: net, drops, dns, sched, io, proc, cgroupfs, node, profile
   disable: []
   # -- Cluster DNS domain (used for ndots waste detection).

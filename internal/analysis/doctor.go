@@ -88,6 +88,7 @@ var rules = []rule{
 	{"accept-queue", ruleAcceptQueue}, {"zero-window", ruleZeroWindow}, {"slow-node", ruleSlowNodes},
 	{"service-balance", ruleServiceBalance}, {"rightsizing", ruleRightsizing}, {"db", ruleDB}, {"files", ruleFiles},
 	{"outlier-replica", ruleOutliers}, {"control-plane", ruleControlPlane}, {"node-network", ruleNodeNetwork},
+	{"voip", ruleVoIP},
 }
 
 // Doctor runs all rules. base may be nil; when present regressions are

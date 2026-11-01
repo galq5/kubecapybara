@@ -138,6 +138,8 @@ type EntityStats struct {
 	Net        *NetStats                `json:"net,omitempty"`
 	DB         map[string]*DBQuery      `json:"db,omitempty"`    // proto|query
 	Files      map[string]*FileStats    `json:"files,omitempty"` // path
+	SIP        *SIPStats                `json:"sip,omitempty"`
+	RTP        *RTPStats                `json:"rtp,omitempty"`
 }
 
 // DBQuery aggregates client-side database requests of one statement shape.
@@ -225,6 +227,18 @@ func (n *NetStats) Merge(o *NetStats) {
 
 // Merge adds o into e.
 func (e *EntityStats) Merge(o *EntityStats) {
+	if o.SIP != nil {
+		if e.SIP == nil {
+			e.SIP = &SIPStats{}
+		}
+		e.SIP.Merge(o.SIP)
+	}
+	if o.RTP != nil {
+		if e.RTP == nil {
+			e.RTP = &RTPStats{}
+		}
+		e.RTP.Merge(o.RTP)
+	}
 	if e.PodUID == "" {
 		e.PodUID = o.PodUID
 	}
@@ -653,6 +667,7 @@ const (
 	EvDNSQuery    = "dns_query"
 	EvHTTPError   = "http_5xx"
 	EvRetrans     = "retrans"
+	EvSIP         = "sip"
 )
 
 // Severities.

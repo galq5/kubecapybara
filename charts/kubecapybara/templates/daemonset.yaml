@@ -76,6 +76,11 @@ spec:
             {{- if .Values.agent.l7 }}
             - --l7
             {{- end }}
+            {{- if .Values.agent.voip.enabled }}
+            - --voip
+            - --sip-ports={{ join "," .Values.agent.voip.sipPorts }}
+            - --rtp-ports={{ .Values.agent.voip.rtpPorts }}
+            {{- end }}
             {{- if .Values.agent.files }}
             - --files
             - --file-threshold={{ .Values.agent.fileThreshold }}

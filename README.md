@@ -53,6 +53,7 @@ HTML frames; any headless browser turns them into PNGs).
 | What is the firewall blocking? | `security`, `doctor` | NetworkPolicy/iptables/tc drops attributed to pod pairs |
 | Is the server keeping up? | `pod`, `doctor` | Accept queue overflows, zero-window stalls, receive queue drops per pod |
 | Who hammers the API server? | `doctor` | Connections/bytes from each workload to the `kubernetes` Service |
+| Are calls failing or choppy? | `voip` | SIP (FreeSWITCH, Asterisk, Kamailio, SBCs): attempts, answer ratio, 5xx/6xx and timeouts, post-dial delay, retransmissions, active calls; RTP: packet loss, jitter (RFC 3550, computed in-kernel per stream) and one-way audio, next to the pod's CPU wait (opt-in `--voip`) |
 | Where is the CPU going? | `profile <pod>` | On-demand, cgroup-filtered CPU sampling with symbolization (kernel, ELF, Go pclntab); folded stacks for flame graphs |
 | What NetworkPolicy do I need? | `netpol deploy/x` | Generates a policy allowing exactly the observed ingress/egress (+ DNS) |
 
@@ -141,6 +142,39 @@ kubectl capybara doctor
 Users of the CLI need read access to pods/services/nodes/replicasets/
 deployments/endpointslices and `pods/proxy` in the agent namespace (the chart
 binds them for `rbac.viewers`; the plain manifest has the roles to bind).
+
+### VoIP (FreeSWITCH, Asterisk, Kamailio)
+
+`--set agent.voip.enabled=true` (agent `--voip`) watches plain SIP on
+`agent.voip.sipPorts` (default 5060, 5080) and RTP on the local port range
+`agent.voip.rtpPorts` (default 16384-32768, FreeSWITCH's defaults):
+
+```bash
+kubectl capybara voip -n voice        # illustrative output
+Calls (SIP)
+POD                  ATTEMPTS  ANSWERED  ASR  FAILED  PEAK CALLS  AVG CALL  PDD p50  TRYING p99  RETRANS  CODES
+voice/freeswitch-0        412       301  73%      38          57     2m14s     2.1s       3.2ms        9  200×301 486×52 503×31 408×7
+Media (RTP)
+POD                  STREAMS IN/OUT  PKTS/s IN  LOSS  JITTER p50  JITTER max  ONE-WAY  CPU WAIT  WORST STREAM
+voice/freeswitch-0   57/57              2.85k  2.4%       6.1ms      48.0ms        1  95ms/s   in 203.0.113.7:31544 PCMA loss 9.8%
+```
+
+* SIP is parsed from the first 1 KiB of each packet (UDP, and TCP when one
+  message fits a segment). Transactions are matched per Call-ID/CSeq and role
+  (`uac` = the pod sent the request, `uas` = it received it). Busy/no answer
+  (486/480/487/603) are not counted as failures. TLS signalling is not visible.
+* RTP is never copied to user space: the kernel keeps per-stream sequence
+  tracking (loss, reordering) and interarrival jitter, using the clock rate
+  of the payload type learned from SDP (`a=rtpmap`, e.g. Opus 48 kHz). Loss and
+  jitter are measured on the receiving side; SRTP works too (the RTP header
+  is not encrypted).
+* Doctor rules: `sip-failures`, `sip-slow-setup`, `sip-retransmissions`,
+  `rtp-loss`, `rtp-jitter` (mentions CPU starvation when the pod also waits
+  for CPU) and `rtp-one-way` (a stream with no media coming back for 10s+).
+* Prometheus: `capybara_sip_requests_total`, `capybara_sip_responses_total{code}`,
+  `capybara_sip_post_dial_delay_seconds`, `capybara_sip_calls_active`,
+  `capybara_rtp_packets_lost_total`, `capybara_rtp_jitter_seconds`,
+  `capybara_rtp_one_way_streams`...
 
 ### Large clusters: the hub
 
