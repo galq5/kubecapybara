@@ -2,6 +2,8 @@ package agent
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -260,3 +262,35 @@ func TestTruncatedStatementsAggregate(t *testing.T) {
 		t.Fatalf("truncated statements differ: %q vs %q", a, b)
 	}
 }
+
+func TestStatePersistence(t *testing.T) {
+	dir := t.TempDir()
+	mk := func() *Agent {
+		return &Agent{cfg: Config{StateDir: dir, Node: "n1"}, store: NewStore(15*time.Minute, 6*time.Hour), rec: NewRecorder(), log: slogDiscard()}
+	}
+	a := mk()
+	now := time.Now()
+	for i := 0; i < 30; i++ {
+		start := now.Add(time.Duration(i-30) * 5 * time.Second)
+		w := NewWindow(start, start.Add(5*time.Second))
+		w.AddPair(&model.Pair{Client: "a", Server: "b", Port: 80, Side: "client", Owner: "x", Connects: 1})
+		a.store.Add(w)
+	}
+	a.rec.Crash("pod:x", "SIGSEGV", now.Add(-time.Minute))
+	if err := a.SaveState(); err != nil {
+		t.Fatal(err)
+	}
+	b := mk()
+	if err := b.LoadState(); err != nil {
+		t.Fatal(err)
+	}
+	q := b.store.Query(now.Add(-3*time.Minute), now)
+	if got := q.Pairs[model.PairKey{Client: "a", Server: "b", Port: 80, Side: "client", Owner: "x"}].Connects; got != 30 {
+		t.Fatalf("restored connects = %d", got)
+	}
+	if len(b.rec.Crashes(now.Add(-time.Hour), now)) != 1 {
+		t.Fatal("crash report not restored")
+	}
+}
+
+func slogDiscard() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }

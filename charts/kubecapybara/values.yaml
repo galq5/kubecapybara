@@ -45,6 +45,11 @@ auth:
   # -- Fixed token (default: generated once and kept across upgrades).
   token: ""
 
+# -- Keep history and crash reports across agent restarts (hostPath on each node).
+persistence:
+  enabled: true
+  hostPath: /var/lib/capybara
+
 # -- Use the host network namespace (node-level conntrack stats, stable port per node).
 hostNetwork: true
 

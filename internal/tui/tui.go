@@ -602,6 +602,8 @@ func (m *model) renderText(b *bytes.Buffer) {
 	case "Security":
 		render.Security(b, st, v, f)
 	case "Cost":
+		render.Section(b, st, "Cost per namespace")
+		render.CostByGroup(b, st, analysis.CostByGroup(v, "", analysis.DefaultPricing, 0.09), "namespace")
 		render.Cost(b, st, v)
 	}
 }

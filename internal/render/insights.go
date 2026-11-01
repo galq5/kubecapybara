@@ -579,3 +579,27 @@ func Counters(w io.Writer, st Style, c *model.Counters) {
 		fmt.Fprintln(w, st.Warn("\n! the pod executes far fewer instructions per cycle than the node average: memory stalls or a noisy neighbour on shared caches"))
 	}
 }
+
+// CostByGroup prints monthly cost per namespace or team.
+func CostByGroup(w io.Writer, st Style, groups []analysis.GroupCost, by string) {
+	if len(groups) == 0 {
+		fmt.Fprintln(w, st.Dim("no pods with Kubernetes metadata in this window"))
+		return
+	}
+	t := &Table{Headers: []string{strings.ToUpper(by), "PODS", "REQUESTS $/MO", "USED $/MO", "UNUSED $/MO", "CROSS-ZONE $/MO", "EGRESS $/MO", "TOTAL $/MO"},
+		Right: map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true}}
+	var tot analysis.GroupCost
+	for _, g := range groups {
+		t.AddRow(g.Group, fmt.Sprint(g.Pods), analysis.Money(g.RequestUSD), analysis.Money(g.UsageUSD), st.Warn(analysis.Money(g.WasteUSD)),
+			analysis.Money(g.CrossZoneUSD), analysis.Money(g.EgressUSD), analysis.Money(g.TotalUSD()))
+		tot.RequestUSD += g.RequestUSD
+		tot.UsageUSD += g.UsageUSD
+		tot.WasteUSD += g.WasteUSD
+		tot.CrossZoneUSD += g.CrossZoneUSD
+		tot.EgressUSD += g.EgressUSD
+	}
+	t.AddRow(st.Title("total"), "", analysis.Money(tot.RequestUSD), analysis.Money(tot.UsageUSD), analysis.Money(tot.WasteUSD),
+		analysis.Money(tot.CrossZoneUSD), analysis.Money(tot.EgressUSD), analysis.Money(tot.TotalUSD()))
+	t.Render(w, st)
+	fmt.Fprintln(w, st.Dim("monthly extrapolation of the window; requests priced per vCPU-hour and GiB-hour, egress per GB sent to the internet"))
+}

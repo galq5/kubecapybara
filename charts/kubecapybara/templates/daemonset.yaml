@@ -69,6 +69,9 @@ spec:
             - --retention={{ .Values.agent.retention }}
             - --cluster-domain={{ .Values.agent.clusterDomain }}
             - --host-prefix=/host
+            {{- if .Values.persistence.enabled }}
+            - --state-dir=/var/lib/capybara
+            {{- end }}
             - --proc=/proc
             {{- if .Values.agent.l7 }}
             - --l7
@@ -132,6 +135,10 @@ spec:
               mountPath: /sys/kernel/debug
             - name: bpffs
               mountPath: /sys/fs/bpf
+            {{- if .Values.persistence.enabled }}
+            - name: state
+              mountPath: /var/lib/capybara
+            {{- end }}
       volumes:
         - name: cgroup
           hostPath:
@@ -145,3 +152,9 @@ spec:
         - name: bpffs
           hostPath:
             path: /sys/fs/bpf
+        {{- if .Values.persistence.enabled }}
+        - name: state
+          hostPath:
+            path: {{ .Values.persistence.hostPath }}
+            type: DirectoryOrCreate
+        {{- end }}

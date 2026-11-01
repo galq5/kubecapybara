@@ -205,3 +205,30 @@ func TestControlPlaneAndNodeNetwork(t *testing.T) {
 		t.Fatalf("node network finding missing: %v", rules)
 	}
 }
+
+func TestMapAndCostByGroup(t *testing.T) {
+	snaps, meta := fixture(t)
+	snaps[1].Pairs[3].Refused = 25 // payments-new -> db refused
+	meta.Pods["pay-new"].Labels["team"] = "payments-team"
+	meta.Pods["pay-new"].Containers[0].CPURequestMilli = 1000
+	v := Build(snaps, meta, Options{})
+	fs := Doctor(v, nil)
+	edges, health := DependencyMap(v, fs)
+	m := Mermaid(edges, health)
+	if !strings.Contains(m, "flowchart LR") || !strings.Contains(m, "shop/Deployment/frontend") || !strings.Contains(m, "stroke:#d33") {
+		t.Fatalf("mermaid:\n%s", m)
+	}
+	if d := Dot(edges, health); !strings.Contains(d, "digraph") || !strings.Contains(d, "->") {
+		t.Fatalf("dot:\n%s", d)
+	}
+	groups := CostByGroup(v, "team", DefaultPricing, 0.09)
+	var team *GroupCost
+	for i := range groups {
+		if groups[i].Group == "payments-team" {
+			team = &groups[i]
+		}
+	}
+	if team == nil || team.RequestUSD < 20 || team.EgressUSD <= 0 {
+		t.Fatalf("groups: %+v", groups)
+	}
+}

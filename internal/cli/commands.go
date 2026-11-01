@@ -53,7 +53,7 @@ func (o *options) cmdEdges() *cobra.Command {
 	var limit int
 	c := &cobra.Command{
 		Use:     "edges",
-		Aliases: []string{"map", "net", "network"},
+		Aliases: []string{"net", "network"},
 		Short:   "Pod-to-pod TCP: RTT, connect latency, throughput, retransmits, refused/timeouts",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return r.View.Edges }, func(st render.Style, r *tui.Result) error {
@@ -354,16 +354,79 @@ func (o *options) cmdSecurity() *cobra.Command {
 }
 
 func (o *options) cmdCost() *cobra.Command {
-	return &cobra.Command{
+	var (
+		by     string
+		label  string
+		egress float64
+	)
+	price := analysis.DefaultPricing
+	c := &cobra.Command{
 		Use:   "cost",
-		Short: "Cross-zone traffic per workload pair and its estimated monthly cost",
+		Short: "Cost per namespace or team (requests, actual use, waste, cross-zone, internet egress), rightsizing and cross-zone pairs",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.CrossZoneCosts(r.View) }, func(st render.Style, r *tui.Result) error {
+			if f := cmd.Flag("window"); f == nil || !f.Changed {
+				o.window = time.Hour
+			}
+			if label != "" {
+				by = "team"
+			}
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any {
+				return map[string]any{"groups": analysis.CostByGroup(r.View, label, price, egress), "crossZone": analysis.CrossZoneCosts(r.View)}
+			}, func(st render.Style, r *tui.Result) error {
+				render.Section(os.Stdout, st, "Cost per "+by)
+				render.CostByGroup(os.Stdout, st, analysis.CostByGroup(r.View, label, price, egress), by)
 				render.Cost(os.Stdout, st, r.View)
 				return nil
 			})
 		},
 	}
+	c.Flags().StringVar(&by, "by", "namespace", "group by namespace (or team with --team-label)")
+	c.Flags().StringVar(&label, "team-label", "", "pod label holding the team name (e.g. team); pods without it fall back to their namespace")
+	c.Flags().Float64Var(&egress, "egress-cost-per-gb", 0.09, "USD per GB sent to the internet")
+	c.Flags().Float64Var(&price.CorePerHour, "cost-per-core-hour", price.CorePerHour, "USD per vCPU hour")
+	c.Flags().Float64Var(&price.GiBPerHour, "cost-per-gib-hour", price.GiBPerHour, "USD per GiB of memory per hour")
+	return c
+}
+
+func (o *options) cmdMap() *cobra.Command {
+	var format string
+	c := &cobra.Command{
+		Use:   "map",
+		Short: "Export the dependency map (workload to workload) as Mermaid or Graphviz, coloured by health",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if f := cmd.Flag("window"); f == nil || !f.Changed {
+				o.window = 15 * time.Minute
+			}
+			res, err := o.load(cmd.Context(), false)
+			if err != nil {
+				return err
+			}
+			o.warn(res)
+			edges, health := analysis.DependencyMap(res.View, res.Findings)
+			if o.filter != "" {
+				var kept []analysis.MapEdge
+				for _, e := range edges {
+					if strings.Contains(e.From, o.filter) || strings.Contains(e.To, o.filter) {
+						kept = append(kept, e)
+					}
+				}
+				edges = kept
+			}
+			switch format {
+			case "mermaid":
+				fmt.Print(analysis.Mermaid(edges, health))
+			case "dot":
+				fmt.Print(analysis.Dot(edges, health))
+			case "json":
+				return o.jsonOut(os.Stdout, map[string]any{"edges": edges, "health": health})
+			default:
+				return fmt.Errorf("unknown format %q (mermaid, dot, json)", format)
+			}
+			return nil
+		},
+	}
+	c.Flags().StringVar(&format, "format", "mermaid", "mermaid, dot or json")
+	return c
 }
 
 func (o *options) cmdNetpol() *cobra.Command {

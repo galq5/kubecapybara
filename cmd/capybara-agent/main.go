@@ -39,6 +39,7 @@ func main() {
 	flag.DurationVar(&cfg.FileThreshold, "file-threshold", 10*time.Millisecond, "minimum duration of a file operation to report")
 	flag.StringVar(&disable, "disable", "", "comma separated collectors to disable (net,drops,dns,sched,io,proc,cgroupfs,node,profile)")
 	flag.StringVar(&cfg.ClusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster DNS domain")
+	flag.StringVar(&cfg.StateDir, "state-dir", "", "directory to persist history and crash reports across restarts (e.g. /var/lib/capybara)")
 	var tokenFile string
 	flag.StringVar(&tokenFile, "token-file", "", "file with the API token (default: $CAPYBARA_TOKEN); empty disables API authentication")
 	flag.BoolVar(&debug, "debug", false, "debug logging")

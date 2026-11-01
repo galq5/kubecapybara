@@ -67,6 +67,7 @@ spec:
           args:
             - --listen=:9876
             - --host-prefix=/host
+            - --state-dir=/var/lib/capybara
             - --proc=/proc
             # HTTP/1.x tracing hooks every read/write syscall; enable if the overhead is acceptable
             # - --l7
@@ -116,6 +117,8 @@ spec:
               mountPath: /sys/kernel/debug
             - name: bpffs
               mountPath: /sys/fs/bpf
+            - name: state
+              mountPath: /var/lib/capybara
       volumes:
         - name: cgroup
           hostPath:
@@ -129,6 +132,10 @@ spec:
         - name: bpffs
           hostPath:
             path: /sys/fs/bpf
+        - name: state
+          hostPath:
+            path: /var/lib/capybara
+            type: DirectoryOrCreate
 ---
 # Permissions needed by people running `kubectl capybara`:
 # read cluster metadata and reach the agents through the API server proxy.

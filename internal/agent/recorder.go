@@ -272,6 +272,19 @@ func (r *Recorder) Crash(entity, reason string, at time.Time) {
 	r.mu.Unlock()
 }
 
+// restoreCrash re-adds a crash report loaded from disk.
+func (r *Recorder) restoreCrash(c model.CrashReport) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.crashes = append(r.crashes, c)
+	if len(r.crashes) > maxCrashes {
+		r.crashes = r.crashes[len(r.crashes)-maxCrashes:]
+	}
+	if c.Time.After(r.lastCrash[c.Entity]) {
+		r.lastCrash[c.Entity] = c.Time
+	}
+}
+
 // Crashes returns crash reports in [from, to].
 func (r *Recorder) Crashes(from, to time.Time) []model.CrashReport {
 	r.mu.Lock()

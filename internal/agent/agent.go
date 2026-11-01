@@ -34,6 +34,8 @@ type Config struct {
 	Disable       map[string]bool
 	ClusterDomain string
 	Version       string
+	// StateDir, when set, persists history and crash reports across restarts.
+	StateDir string
 	// Token, when set, must be sent in the X-Capybara-Token header to use
 	// the /v1 API (healthz and metrics stay open).
 	Token string
@@ -183,10 +185,19 @@ func (a *Agent) Start() error {
 // Run starts collectors, the HTTP server and the collection loop. It blocks
 // until ctx is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
+	if err := a.LoadState(); err != nil {
+		a.log.Warn("could not restore state", "err", err)
+	}
 	if err := a.Start(); err != nil {
 		return err
 	}
 	defer a.Close()
+	defer func() {
+		if err := a.SaveState(); err != nil {
+			a.log.Warn("could not save state", "err", err)
+		}
+	}()
+	lastSave := time.Now()
 
 	if a.cfg.Token == "" {
 		a.log.Warn("API authentication disabled: anyone who can reach the agent port can read process command lines and traffic data; set CAPYBARA_TOKEN")
@@ -215,6 +226,14 @@ func (a *Agent) Run(ctx context.Context) error {
 		case now := <-t.C:
 			a.Tick(last, now)
 			last = now
+			if now.Sub(lastSave) >= time.Minute {
+				lastSave = now
+				go func() {
+					if err := a.SaveState(); err != nil {
+						a.log.Warn("could not save state", "err", err)
+					}
+				}()
+			}
 		}
 	}
 }
