@@ -142,11 +142,47 @@ Users of the CLI need read access to pods/services/nodes/replicasets/
 deployments/endpointslices and `pods/proxy` in the agent namespace (the chart
 binds them for `rbac.viewers`; the plain manifest has the roles to bind).
 
+### Controller: findings as Kubernetes objects, Slack and webhooks
+
+`--set controller.enabled=true` adds a single-replica Deployment
+(`capybara-controller`, same image) that runs the doctor every minute over the
+last 5 minutes and keeps one `CapyFinding` object per rule and workload:
+
+```bash
+kubectl get capyfindings -A          # short name: capyf
+NAMESPACE  NAME                     SEVERITY  CATEGORY  STATE     TITLE                                   LAST-SEEN  AGE
+shop       cpu-throttling-1c9e2a7b  CRIT      cpu       Active    shop/api throttled in 62% of CFS periods 20s        14m
+shop       slo-burn-5d01f3c2        WARN      slo       Resolved  checkout-latency burning budget 6.1x     12m        2h
+kubectl get capyf -n shop cpu-throttling-1c9e2a7b -o yaml   # details, hint, firstSeen, occurrences
+```
+
+A finding is `Active` while the doctor reports it, becomes `Resolved` after
+`controller.resolveAfter` (10m) without it and is deleted after
+`controller.keepResolved` (1h). Findings about a pod live in the pod's
+namespace, so namespace RBAC applies to who can see them; cluster-wide ones go
+to the release namespace. Only `minSeverity` (default `warn`) and above are
+stored.
+
+Notifications are sent on *firing* and *resolved*:
+
+```bash
+kubectl -n capybara create secret generic capybara-hooks \
+  --from-literal=slack-webhook-url=https://hooks.slack.com/services/... \
+  --from-literal=webhook-url=https://alerts.example.com/capybara   # optional, JSON body
+helm upgrade capybara ... --set controller.enabled=true \
+  --set controller.notifications.existingSecret=capybara-hooks --set controller.clusterName=prod
+```
+
+The generic webhook receives `{"event":"firing","namespace":...,"name":...,
+"rule":...,"severity":"CRIT","title":...,"details":[...],"hint":...}`; the
+Slack format also works with Mattermost. SLOs set in `controller.slos` (same
+format as `--slo-file`) get burn-rate findings.
+
 ### Releasing
 
 `git tag v0.1.0 && git push --tags` runs `.github/workflows/release.yml`: it
-pushes the agent image to `ghcr.io/<owner>/kubecapybara-agent`, attaches CLI
-binaries to a GitHub release and pushes the chart to
+pushes the agent image to `ghcr.io/<owner>/kubecapybara-agent` (it also
+contains `/capybara-controller`), attaches CLI and controller binaries to a GitHub release and pushes the chart to
 `oci://ghcr.io/<owner>/charts`. For a private repository the image is private:
 create a pull secret (`kubectl create secret docker-registry ghcr
 --docker-server=ghcr.io --docker-username=<user> --docker-password=<PAT with

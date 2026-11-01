@@ -1,0 +1,227 @@
+{{- if .Values.controller.enabled }}
+{{- $fullname := include "capybara.fullname" . }}
+{{- $c := .Values.controller }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-controller
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+  - apiGroups: ["capybara.dev"]
+    resources: ["capyfindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-controller
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-controller
+    namespace: {{ .Release.Namespace }}
+---
+# Reaching the agents through the API server pod proxy.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/proxy"]
+    verbs: ["get"]
+  {{- if .Values.auth.enabled }}
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ .Values.auth.secretName | quote }}]
+    verbs: ["get"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-controller
+    namespace: {{ .Release.Namespace }}
+{{- if $c.slos }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-slos
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+data:
+  slos.yaml: |
+    {{- dict "slos" $c.slos | toYaml | nindent 4 }}
+{{- end }}
+{{- if and (not $c.notifications.existingSecret) (or $c.notifications.webhookURL $c.notifications.slackWebhookURL) }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $fullname }}-notifications
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  {{- with $c.notifications.webhookURL }}
+  webhook-url: {{ . | quote }}
+  {{- end }}
+  {{- with $c.notifications.slackWebhookURL }}
+  slack-webhook-url: {{ . | quote }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-controller
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+    app.kubernetes.io/name: capybara-controller
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  # Reconciliation is not leader-elected: run exactly one replica.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: capybara-controller
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "capybara.labels" . | nindent 8 }}
+        app.kubernetes.io/name: capybara-controller
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- if $c.slos }}
+      annotations:
+        checksum/slos: {{ dict "slos" $c.slos | toYaml | sha256sum }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $fullname }}-controller
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with $c.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $c.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: controller
+          image: {{ include "capybara.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/capybara-controller"]
+          args:
+            - --interval={{ $c.interval }}
+            - --window={{ $c.window }}
+            - --baseline={{ $c.baseline }}
+            - --min-severity={{ $c.minSeverity }}
+            - --resolve-after={{ $c.resolveAfter }}
+            - --keep-resolved={{ $c.keepResolved }}
+            - --namespace={{ default .Release.Namespace $c.findingsNamespace }}
+            - --agent-namespace={{ .Release.Namespace }}
+            - --agent-selector=app.kubernetes.io/name=capybara-agent,app.kubernetes.io/instance={{ .Release.Name }}
+            - --agent-port={{ .Values.agent.port }}
+            - --cluster-domain={{ .Values.agent.clusterDomain }}
+            {{- if .Values.auth.enabled }}
+            - --agent-token-secret={{ .Values.auth.secretName }}
+            {{- else }}
+            - --agent-token-secret=
+            {{- end }}
+            {{- with $c.clusterName }}
+            - --cluster-name={{ . }}
+            {{- end }}
+            {{- if $c.slos }}
+            - --slo-file=/etc/capybara/slos.yaml
+            {{- end }}
+            {{- range $c.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          {{- $secret := default (printf "%s-notifications" $fullname) $c.notifications.existingSecret }}
+          {{- $hasNotify := or $c.notifications.existingSecret $c.notifications.webhookURL $c.notifications.slackWebhookURL }}
+          {{- if $hasNotify }}
+          env:
+            - name: CAPYBARA_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: webhook-url, optional: true}
+            - name: CAPYBARA_SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef: {name: {{ $secret }}, key: slack-webhook-url, optional: true}
+          {{- end }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          {{- if $c.slos }}
+          volumeMounts:
+            - name: slos
+              mountPath: /etc/capybara
+              readOnly: true
+          {{- end }}
+      {{- if $c.slos }}
+      volumes:
+        - name: slos
+          configMap:
+            name: {{ $fullname }}-slos
+      {{- end }}
+{{- end }}

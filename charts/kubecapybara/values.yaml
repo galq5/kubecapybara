@@ -117,3 +117,44 @@ metrics:
     enabled: false
     label: grafana_dashboard
     namespace: ""
+
+# -- Controller: evaluates the doctor periodically, keeps CapyFinding objects in
+# sync (`kubectl get capyfindings -A`) and notifies Slack / webhooks when a
+# finding fires or resolves. The CRD ships in crds/ and is installed by Helm.
+controller:
+  enabled: false
+  interval: 1m
+  # -- Window analysed at each evaluation.
+  window: 5m
+  # -- Baseline before the window used for regression rules (0s disables).
+  baseline: 1h
+  # -- Lowest severity stored and notified: info, warn or crit.
+  minSeverity: warn
+  # -- Resolve a finding after it has not been seen for this long.
+  resolveAfter: 10m
+  # -- Delete resolved findings after this long.
+  keepResolved: 1h
+  # -- Namespace for findings not tied to a pod (default: release namespace).
+  findingsNamespace: ""
+  # -- Shown in notifications.
+  clusterName: ""
+  notifications:
+    # -- Secret with keys webhook-url and/or slack-webhook-url (recommended).
+    existingSecret: ""
+    # -- Generic webhook: receives each notification as JSON.
+    webhookURL: ""
+    # -- Slack (or Mattermost) incoming webhook URL.
+    slackWebhookURL: ""
+  # -- SLOs evaluated with burn-rate alerts, same format as --slo-file:
+  #   - {name: checkout-latency, workload: shop/Deployment/checkout, latency: 300ms, latencyObjective: 99}
+  #   - {name: api-availability, service: shop/api, availability: 99.5}
+  slos: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+  extraArgs: []
