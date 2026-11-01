@@ -75,15 +75,48 @@ dependencies.
 
 ## Install
 
+With Helm (chart published to ghcr.io on every release tag):
+
 ```bash
-make image IMAGE=ghcr.io/<you>/kubecapybara-agent      # or use a published image
+helm install capybara oci://ghcr.io/galq5/charts/kubecapybara \
+  -n capybara --create-namespace \
+  --set rbac.viewers.groups={sre}            # who may run kubectl capybara
+kubectl label ns capybara pod-security.kubernetes.io/enforce=privileged   # if PSA is enforced
+```
+
+Useful values (see `charts/kubecapybara/values.yaml`): `image.tag`,
+`imagePullSecrets` (private registries), `agent.l7`, `agent.disable`,
+`nodeSelector` (e.g. only workers), `metrics.serviceMonitor.enabled`.
+Installed in another namespace? Pass `--agent-namespace <ns>` to the CLI.
+
+Or with plain manifests:
+
+```bash
 kubectl apply -f deploy/kubernetes/capybara.yaml
-make install-cli                                       # installs kubectl-capybara to ~/.local/bin
+```
+
+The CLI (kubectl plugin): download `kubectl-capybara` from the GitHub release
+(linux/darwin, amd64/arm64), put it on your `PATH`, or `make install-cli`.
+
+```bash
+kubectl capybara nodes     # which collectors run on each node
 kubectl capybara doctor
 ```
 
-Users of the CLI need the `capybara-viewer` ClusterRole and `pods/proxy` in the
-`capybara` namespace (both in the manifest; bind them to your groups).
+Users of the CLI need read access to pods/services/nodes/replicasets/
+deployments/endpointslices and `pods/proxy` in the agent namespace (the chart
+binds them for `rbac.viewers`; the plain manifest has the roles to bind).
+
+### Releasing
+
+`git tag v0.1.0 && git push --tags` runs `.github/workflows/release.yml`: it
+pushes the agent image to `ghcr.io/<owner>/kubecapybara-agent`, attaches CLI
+binaries to a GitHub release and pushes the chart to
+`oci://ghcr.io/<owner>/charts`. For a private repository the image is private:
+create a pull secret (`kubectl create secret docker-registry ghcr
+--docker-server=ghcr.io --docker-username=<user> --docker-password=<PAT with
+read:packages>`) and set `imagePullSecrets[0].name=ghcr`, or make the package
+public in its GitHub settings.
 
 Requirements: Linux ≥ 5.8 with BTF (`/sys/kernel/btf/vmlinux`), cgroup v2,
 x86_64 (arm64 needs an arm64 `vmlinux.h`, see Development). Drop reasons need
@@ -148,7 +181,8 @@ internal/analysis/   name resolution, doctor rules, baseline, rollout, startup, 
 internal/render/     text reports shared by CLI and TUI
 internal/tui/        bubbletea dashboard
 cmd/                 capybara-agent, kubectl-capybara
-deploy/kubernetes/   DaemonSet + RBAC
+deploy/kubernetes/   DaemonSet + RBAC (plain manifests)
+charts/kubecapybara/ Helm chart
 ```
 
 ```bash

@@ -1,0 +1,24 @@
+kubecapybara agents are starting on every node:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/name=capybara-agent -o wide
+
+Install the CLI (kubectl plugin) from the GitHub release or with `make install-cli`, then:
+
+  kubectl capybara {{- if ne .Release.Namespace "capybara" }} --agent-namespace {{ .Release.Namespace }}{{ end }}{{- if ne (int .Values.agent.port) 9876 }} --agent-port {{ .Values.agent.port }}{{ end }} nodes     # which collectors run on each node
+  kubectl capybara {{- if ne .Release.Namespace "capybara" }} --agent-namespace {{ .Release.Namespace }}{{ end }}{{- if ne (int .Values.agent.port) 9876 }} --agent-port {{ .Values.agent.port }}{{ end }} doctor    # what is wrong right now
+  kubectl capybara {{- if ne .Release.Namespace "capybara" }} --agent-namespace {{ .Release.Namespace }}{{ end }}{{- if ne (int .Values.agent.port) 9876 }} --agent-port {{ .Values.agent.port }}{{ end }}           # interactive dashboard
+{{- if not .Values.namespace.create }}
+
+The agent is privileged. If Pod Security Admission is enforced, label the namespace:
+
+  kubectl label ns {{ .Release.Namespace }} pod-security.kubernetes.io/enforce=privileged
+{{- end }}
+{{- if and .Values.rbac.create (not (or .Values.rbac.viewers.groups .Values.rbac.viewers.users .Values.rbac.viewers.serviceAccounts)) }}
+
+No CLI users were bound. Grant access with --set rbac.viewers.groups={your-group}
+(roles: {{ include "capybara.fullname" . }}-viewer, {{ include "capybara.fullname" . }}-agent-proxy).
+{{- end }}
+{{- if .Values.agent.l7 }}
+
+HTTP tracing (--l7) is enabled: it hooks every read/write syscall on the nodes.
+{{- end }}

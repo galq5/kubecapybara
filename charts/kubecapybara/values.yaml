@@ -1,0 +1,92 @@
+# -- Agent image. The tag defaults to the chart appVersion.
+image:
+  repository: ghcr.io/galq5/kubecapybara-agent
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# -- Needed when the image is private (e.g. ghcr.io from a private repo):
+#   kubectl -n <ns> create secret docker-registry ghcr \
+#     --docker-server=ghcr.io --docker-username=<user> --docker-password=<PAT with read:packages>
+imagePullSecrets: []
+#  - name: ghcr
+
+nameOverride: ""
+fullnameOverride: ""
+
+agent:
+  # -- API / metrics port. With hostNetwork this port is opened on every node.
+  port: 9876
+  # -- Collection interval.
+  interval: 5s
+  # -- Full resolution history kept in memory.
+  fineRetention: 15m
+  # -- 1-minute rollup history kept in memory.
+  retention: 6h
+  # -- HTTP/1.x request tracing. Hooks every read/write syscall on the node.
+  l7: false
+  # -- Collectors to disable: net, drops, dns, sched, io, proc, cgroupfs, node, profile
+  disable: []
+  # -- Cluster DNS domain (used for ndots waste detection).
+  clusterDomain: cluster.local
+  debug: false
+  extraArgs: []
+  extraEnv: []
+
+# -- Use the host network namespace (node-level conntrack stats, stable port per node).
+hostNetwork: true
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+priorityClassName: system-node-critical
+
+# -- Run on every node, including tainted ones (control plane, GPU nodes...).
+tolerations:
+  - operator: Exists
+
+# -- Restrict the agent to some nodes, e.g. only workers:
+#   nodeSelector: {node-role.kubernetes.io/worker: ""}
+nodeSelector: {}
+affinity: {}
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 25%
+
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# -- Create the namespace with the privileged Pod Security label. Leave false
+# when using `helm install --create-namespace` and label it yourself:
+#   kubectl label ns <ns> pod-security.kubernetes.io/enforce=privileged
+namespace:
+  create: false
+
+rbac:
+  create: true
+  # -- Who may use `kubectl capybara` (read cluster metadata + reach agents via the API server proxy).
+  viewers:
+    groups: []
+    users: []
+    serviceAccounts: []
+    # - {name: grafana, namespace: monitoring}
+
+metrics:
+  # -- Add prometheus.io/* scrape annotations to agent pods.
+  podAnnotations: true
+  serviceMonitor:
+    # -- Create a Prometheus Operator ServiceMonitor (and a headless Service).
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}

@@ -1,0 +1,10 @@
+apiVersion: v2
+name: kubecapybara
+description: eBPF observability for Kubernetes - pod-to-pod latency, DNS, CPU time breakdown, crashes, rollouts
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/galq5/kubecapybara
+sources:
+  - https://github.com/galq5/kubecapybara
+keywords: [ebpf, observability, networking, dns, latency, kubectl-plugin]

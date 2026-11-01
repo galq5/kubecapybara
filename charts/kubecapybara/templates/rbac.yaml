@@ -1,0 +1,67 @@
+{{- if .Values.rbac.create }}
+{{- $fullname := include "capybara.fullname" . }}
+{{- $v := .Values.rbac.viewers }}
+{{- $hasSubjects := or $v.groups $v.users $v.serviceAccounts }}
+# Read access to the cluster metadata kubectl-capybara uses to name things.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-viewer
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+---
+# Reaching the agents through the API server pod proxy.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fullname }}-agent-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/proxy"]
+    verbs: ["get"]
+{{- if $hasSubjects }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-viewer
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-viewer
+subjects:
+  {{- include "capybara.subjects" $v | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fullname }}-agent-proxy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fullname }}-agent-proxy
+subjects:
+  {{- include "capybara.subjects" $v | nindent 2 }}
+{{- end }}
+{{- end }}

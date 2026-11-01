@@ -34,3 +34,17 @@ jobs:
         run: make generate
       - name: load programs into the runner kernel (verifier)
         run: make test-bpf
+
+  chart:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: lint chart
+        run: helm lint charts/kubecapybara
+      - name: render chart
+        run: |
+          helm template capybara charts/kubecapybara > /dev/null
+          helm template capybara charts/kubecapybara -n observability \
+            --set namespace.create=true --set agent.l7=true --set metrics.serviceMonitor.enabled=true \
+            --set rbac.viewers.groups={sre} --set imagePullSecrets[0].name=ghcr > /dev/null
