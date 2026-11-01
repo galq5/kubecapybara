@@ -108,3 +108,12 @@ metrics:
     interval: 30s
     scrapeTimeout: 10s
     labels: {}
+  prometheusRule:
+    # -- Create a PrometheusRule with alerts on the agent metrics (needs the Prometheus Operator).
+    enabled: false
+    labels: {}
+  grafanaDashboard:
+    # -- Ship the Grafana dashboard as a ConfigMap picked up by the Grafana sidecar.
+    enabled: false
+    label: grafana_dashboard
+    namespace: ""

@@ -1,0 +1,90 @@
+{{- if .Values.metrics.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "capybara.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+    {{- with .Values.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: kubecapybara
+      rules:
+        - alert: CapybaraDNSFailures
+          expr: |
+            sum by (entity, pod_uid) (rate(capybara_dns_responses_total{rcode=~"SERVFAIL|REFUSED"}[5m]))
+              / sum by (entity, pod_uid) (rate(capybara_dns_queries_total[5m])) > 0.05
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "More than 5% of DNS lookups of {{ "{{ $labels.entity }}" }} fail"
+        - alert: CapybaraAcceptQueueOverflow
+          expr: sum by (entity, pod_uid) (increase(capybara_tcp_listen_overflows_total[5m])) > 0
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ "{{ $labels.entity }}" }} cannot accept connections fast enough (accept queue overflows)"
+        - alert: CapybaraConnectionsRefused
+          expr: sum by (owner, server, port) (rate(capybara_tcp_refused_total[5m])) > 0.5
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ "{{ $labels.owner }}" }} → {{ "{{ $labels.server }}:{{ $labels.port }}" }}: connections refused"
+        - alert: CapybaraTCPRetransmits
+          expr: sum by (client, server, port) (rate(capybara_tcp_retransmits_total[5m])) > 5
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "Lossy path {{ "{{ $labels.client }} → {{ $labels.server }}:{{ $labels.port }}" }}"
+        - alert: CapybaraHTTP5xx
+          expr: |
+            sum by (entity, pod_uid) (rate(capybara_http_requests_total{role="server",status="5xx"}[5m]))
+              / sum by (entity, pod_uid) (rate(capybara_http_requests_total{role="server"}[5m])) > 0.05
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "More than 5% HTTP 5xx from {{ "{{ $labels.entity }}" }}"
+        - alert: CapybaraDatabaseErrors
+          expr: |
+            sum by (entity, db) (rate(capybara_db_errors_total[5m]))
+              / sum by (entity, db) (rate(capybara_db_requests_total[5m])) > 0.05
+          for: 5m
+          labels: {severity: warning}
+          annotations:
+            summary: "More than 5% of {{ "{{ $labels.db }}" }} requests of {{ "{{ $labels.entity }}" }} fail"
+        - alert: CapybaraCPURunQueue
+          expr: histogram_quantile(0.99, sum by (entity, pod_uid, le) (rate(capybara_runqueue_latency_seconds_bucket[5m]))) > 0.05
+          for: 15m
+          labels: {severity: info}
+          annotations:
+            summary: "{{ "{{ $labels.entity }}" }} waits more than 50ms for a CPU (p99): noisy neighbours or CPU saturation"
+        - alert: CapybaraConntrackFull
+          expr: capybara_conntrack_entries / capybara_conntrack_max > 0.85
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: "Conntrack table above 85% on {{ "{{ $labels.node }}" }}"
+        - alert: CapybaraSlowFileOperations
+          expr: sum by (entity, path) (rate(capybara_slow_file_wait_seconds_total[5m])) > 0.2
+          for: 10m
+          labels: {severity: warning}
+          annotations:
+            summary: "{{ "{{ $labels.entity }}" }} spends over 20% of its time in slow operations on {{ "{{ $labels.path }}" }}"
+{{- end }}
+{{- if .Values.metrics.grafanaDashboard.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "capybara.fullname" . }}-dashboard
+  namespace: {{ .Values.metrics.grafanaDashboard.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+    {{ .Values.metrics.grafanaDashboard.label }}: "1"
+data:
+  kubecapybara.json: |-
+    {{- .Files.Get "dashboards/kubecapybara.json" | nindent 4 }}
+{{- end }}
