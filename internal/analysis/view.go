@@ -162,6 +162,8 @@ type View struct {
 	Drops    []*model.Drop
 	Nodes    map[string]*NodeView
 	DNSNames map[string]string
+	// Series holds resource samples (memory, CPU) per entity key, oldest first.
+	Series map[string][]model.ResourceSample
 }
 
 // Seconds is the length of the window.
@@ -195,6 +197,7 @@ func Build(snaps []*model.Snapshot, meta *k8smeta.Meta, opts Options) *View {
 		Entities: map[string]*EntityView{},
 		Nodes:    map[string]*NodeView{},
 		DNSNames: map[string]string{},
+		Series:   map[string][]model.ResourceSample{},
 	}
 	for _, s := range snaps {
 		if v.From.IsZero() || s.From.Before(v.From) {
@@ -243,6 +246,14 @@ func Build(snaps []*model.Snapshot, meta *k8smeta.Meta, opts Options) *View {
 		for _, st := range s.Startups {
 			v.Startups = append(v.Startups, StartupView{Startup: st, Node: s.Node, Endpoint: v.EntityEndpoint(st.Entity, s.Node)})
 		}
+		for id, ser := range s.Series {
+			k := v.entityKey(id, s.Node)
+			v.Series[k] = append(v.Series[k], ser...)
+		}
+	}
+	for k := range v.Series {
+		ser := v.Series[k]
+		sort.Slice(ser, func(i, j int) bool { return ser[i].Time.Before(ser[j].Time) })
 	}
 	sort.Slice(v.Events, func(i, j int) bool { return v.Events[i].Time.Before(v.Events[j].Time) })
 	sort.Slice(v.Crashes, func(i, j int) bool { return v.Crashes[i].Time.After(v.Crashes[j].Time) })

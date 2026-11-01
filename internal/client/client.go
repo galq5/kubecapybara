@@ -38,6 +38,8 @@ type Source interface {
 	Profile(ctx context.Context, node, entity string, seconds, hz int) (*model.Profile, error)
 	// Meta returns cluster metadata (nil when unavailable).
 	Meta(ctx context.Context) (*k8smeta.Meta, error)
+	// PodEvents returns Kubernetes events of a pod (nil when unavailable).
+	PodEvents(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error)
 	// Describe returns a short description for status lines.
 	Describe() string
 }
@@ -210,6 +212,10 @@ func (k *KubeSource) Profile(ctx context.Context, node, entity string, seconds, 
 	return nil, fmt.Errorf("no agent running on node %s", node)
 }
 
+func (k *KubeSource) PodEvents(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error) {
+	return k8smeta.LoadPodEvents(ctx, k.CS, ns, uid)
+}
+
 func (k *KubeSource) Meta(ctx context.Context) (*k8smeta.Meta, error) {
 	k.metaMu.Lock()
 	defer k.metaMu.Unlock()
@@ -231,9 +237,11 @@ func (k *KubeSource) Meta(ctx context.Context) (*k8smeta.Meta, error) {
 
 // DirectSource talks to agents at explicit URLs (e.g. http://node:9876).
 type DirectSource struct {
-	URLs   []string
-	Token  string // agent API token, if the agents require one
-	Client *http.Client
+	// EventsFn optionally lists pod events (e.g. with a kube client).
+	EventsFn func(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error)
+	URLs     []string
+	Token    string // agent API token, if the agents require one
+	Client   *http.Client
 	// MetaSource optionally provides metadata (e.g. a kube client).
 	MetaFn func(ctx context.Context) (*k8smeta.Meta, error)
 }
@@ -340,6 +348,13 @@ func (d *DirectSource) Profile(ctx context.Context, node, entity string, seconds
 	return nil, lastErr
 }
 
+func (d *DirectSource) PodEvents(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error) {
+	if d.EventsFn != nil {
+		return d.EventsFn(ctx, ns, uid)
+	}
+	return nil, nil
+}
+
 func (d *DirectSource) Meta(ctx context.Context) (*k8smeta.Meta, error) {
 	if d.MetaFn != nil {
 		return d.MetaFn(ctx)
@@ -391,6 +406,10 @@ func (f *FileSource) Profile(context.Context, string, string, int, int) (*model.
 }
 
 func (f *FileSource) Meta(context.Context) (*k8smeta.Meta, error) { return f.bundle.Meta, nil }
+
+func (f *FileSource) PodEvents(context.Context, string, string) ([]k8smeta.PodEvent, error) {
+	return nil, nil
+}
 
 func sortSnaps(s []*model.Snapshot) {
 	sort.Slice(s, func(i, j int) bool { return s[i].Node < s[j].Node })

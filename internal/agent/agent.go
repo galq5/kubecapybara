@@ -116,6 +116,7 @@ func New(cfg Config) (*Agent, error) {
 		&ioCollector{},
 		&procCollector{},
 		&cgroupfsCollector{},
+		&netstatCollector{},
 		&nodeCollector{},
 		a.profiler,
 	}
@@ -250,6 +251,7 @@ func (a *Agent) Snapshot(from, to time.Time, lite bool) *model.Snapshot {
 		snap.Listens = a.rec.Listens()
 		snap.Crashes = a.rec.Crashes(from, to)
 		snap.Startups = a.rec.Startups(from, to)
+		snap.Series = a.rec.Series(from, to)
 	}
 	if snap.From.IsZero() {
 		snap.From = from

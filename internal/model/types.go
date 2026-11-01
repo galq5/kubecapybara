@@ -36,6 +36,8 @@ type Snapshot struct {
 	Listens    []Listen                `json:"listens,omitempty"`
 	Crashes    []CrashReport           `json:"crashes,omitempty"`
 	Startups   []Startup               `json:"startups,omitempty"`
+	// Series holds per-entity resource samples (memory, CPU) in the range.
+	Series map[string][]ResourceSample `json:"series,omitempty"`
 }
 
 // Pair is TCP traffic between a client and a server endpoint as observed
@@ -63,6 +65,9 @@ type Pair struct {
 	RstSent      uint64 `json:"rstSent,omitempty"`
 	RstRcvd      uint64 `json:"rstRcvd,omitempty"`
 	MTUReduced   uint64 `json:"mtuReduced,omitempty"`
+	// ZeroWindow counts 100ms samples in which the server/peer advertised a
+	// zero receive window (it was not reading fast enough).
+	ZeroWindow uint64 `json:"zeroWindow,omitempty"`
 }
 
 // PairKey identifies a Pair.
@@ -94,6 +99,7 @@ func (p *Pair) Add(o *Pair) {
 	p.RstSent += o.RstSent
 	p.RstRcvd += o.RstRcvd
 	p.MTUReduced += o.MTUReduced
+	p.ZeroWindow += o.ZeroWindow
 }
 
 // Clone returns a deep copy.
@@ -119,6 +125,29 @@ type EntityStats struct {
 	DNSServer  *DNSStats                `json:"dnsServer,omitempty"`
 	HTTP       map[string]*HTTPEndpoint `json:"http,omitempty"`
 	ConnErrors map[string]uint64        `json:"connErrors,omitempty"`
+	Net        *NetStats                `json:"net,omitempty"`
+}
+
+// NetStats are TCP counters of a pod's network namespace (TcpExt, deltas).
+type NetStats struct {
+	ListenOverflows uint64 `json:"listenOverflows,omitempty"` // accept queue full
+	ListenDrops     uint64 `json:"listenDrops,omitempty"`
+	ZeroWindowDrops uint64 `json:"zeroWindowDrops,omitempty"` // dropped: our receive window was closed
+	ToZeroWindowAdv uint64 `json:"toZeroWindowAdv,omitempty"` // we advertised a zero window (slow reader)
+	RcvQueueDrops   uint64 `json:"rcvqDrops,omitempty"`
+	BacklogDrops    uint64 `json:"backlogDrops,omitempty"`
+	Timeouts        uint64 `json:"timeouts,omitempty"` // RTO timeouts
+}
+
+// Merge adds o into n.
+func (n *NetStats) Merge(o *NetStats) {
+	n.ListenOverflows += o.ListenOverflows
+	n.ListenDrops += o.ListenDrops
+	n.ZeroWindowDrops += o.ZeroWindowDrops
+	n.ToZeroWindowAdv += o.ToZeroWindowAdv
+	n.RcvQueueDrops += o.RcvQueueDrops
+	n.BacklogDrops += o.BacklogDrops
+	n.Timeouts += o.Timeouts
 }
 
 // Merge adds o into e.
@@ -178,6 +207,12 @@ func (e *EntityStats) Merge(o *EntityStats) {
 			e.ConnErrors = map[string]uint64{}
 		}
 		e.ConnErrors[k] += v
+	}
+	if o.Net != nil {
+		if e.Net == nil {
+			e.Net = &NetStats{}
+		}
+		e.Net.Merge(o.Net)
 	}
 }
 

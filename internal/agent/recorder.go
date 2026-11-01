@@ -221,6 +221,21 @@ func (r *Recorder) Sample(entity string, s model.ResourceSample) {
 	r.series[entity] = ser
 }
 
+// Series returns resource samples taken in [from, to] per entity.
+func (r *Recorder) Series(from, to time.Time) map[string][]model.ResourceSample {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := map[string][]model.ResourceSample{}
+	for e, ser := range r.series {
+		for _, s := range ser {
+			if !s.Time.Before(from) && !s.Time.After(to) {
+				out[e] = append(out[e], s)
+			}
+		}
+	}
+	return out
+}
+
 // Crash freezes a crash report for an entity (deduplicated per 10s).
 func (r *Recorder) Crash(entity, reason string, at time.Time) {
 	r.mu.Lock()

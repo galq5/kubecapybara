@@ -71,6 +71,7 @@ type NetPairVal struct {
 	RstSent      uint64
 	RstRcvd      uint64
 	MtuReduced   uint64
+	ZeroWindow   uint64
 }
 
 type NetSkInfo struct {

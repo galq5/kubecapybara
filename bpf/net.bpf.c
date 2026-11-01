@@ -70,6 +70,7 @@ struct pair_val {
 	__u64 rst_sent;
 	__u64 rst_rcvd;
 	__u64 mtu_reduced;
+	__u64 zero_window; /* 100ms samples where the peer advertised a zero window */
 };
 
 struct sk_info {
@@ -436,6 +437,9 @@ int BPF_PROG(on_tcp_probe, struct sock *sk, struct sk_buff *skb)
 	if (!val)
 		return 0;
 	flush_bytes(sk, info, val);
+	/* the peer's receive window is closed: it is not reading fast enough */
+	if (BPF_CORE_READ(tp, snd_wnd) == 0)
+		__sync_fetch_and_add(&val->zero_window, 1);
 	srtt = BPF_CORE_READ(tp, srtt_us) >> 3;
 	if (srtt)
 		hist_add(&val->rtt, srtt);

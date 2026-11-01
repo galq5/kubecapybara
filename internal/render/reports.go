@@ -305,6 +305,27 @@ func Pod(w io.Writer, st Style, v *analysis.View, id string) {
 		}
 		fmt.Fprintf(w, "  pressure (avg10): cpu %.1f%%  memory %.1f%%  io %.1f%%\n", r.PSICPU, r.PSIMem, r.PSIIO)
 	}
+	if cpu, mem := SeriesSparks(v, id, 40); cpu != "" {
+		fmt.Fprintf(w, "  cpu    %s\n", st.Accent(cpu))
+		if strings.Trim(mem, "▁") != "" || len(v.Series[id]) > 0 && v.Series[id][0].MemCurrent > 0 {
+			fmt.Fprintf(w, "  memory %s\n", st.Accent(mem))
+		}
+	}
+	for _, r := range analysis.OOMRisks(v) {
+		if r.Endpoint.ID == id {
+			fmt.Fprintf(w, "  %s\n", st.Crit(fmt.Sprintf("memory grows %s/min: limit reached in ~%s", analysis.Bytes(r.BytesPerSec*60), r.ETA.Round(time.Minute))))
+		}
+	}
+	if p := e.Pod; p != nil {
+		cpuReq, cpuLim, memReq, memLim := p.Requests()
+		fmt.Fprintf(w, "  requests cpu %s mem %s  limits cpu %s mem %s\n", milli(cpuReq), mibOrDash(memReq), milli(cpuLim), mibOrDash(memLim))
+	}
+	if n := s.Net; n != nil {
+		Section(w, st, "TCP (pod network namespace)")
+		fmt.Fprintf(w, "  accept queue overflows %d  SYNs dropped %d  RTO timeouts %d\n", n.ListenOverflows, n.ListenDrops, n.Timeouts)
+		fmt.Fprintf(w, "  zero window advertised %d  zero-window drops %d  receive queue drops %d  backlog drops %d\n",
+			n.ToZeroWindowAdv, n.ZeroWindowDrops, n.RcvQueueDrops, n.BacklogDrops)
+	}
 	if io := s.IO; io != nil && io.Lat.Count > 0 {
 		Section(w, st, "Disk")
 		fmt.Fprintf(w, "  read %s/s  write %s/s  ops %s/s  latency p50 %s p99 %s\n",
@@ -492,6 +513,11 @@ func DNS(w io.Writer, st Style, v *analysis.View, f Filter) {
 
 // Nodes prints the noisy-neighbour view.
 func Nodes(w io.Writer, st Style, v *analysis.View, f Filter) {
+	if m := analysis.BuildNodeMatrix(v); len(m.Nodes) > 1 {
+		Section(w, st, "Node-to-node latency")
+		NodeHeatmap(w, st, v)
+		fmt.Fprintln(w)
+	}
 	for _, r := range analysis.NodeReports(v) {
 		n := r.Node
 		ct := "-"
@@ -642,6 +668,8 @@ func Security(w io.Writer, st Style, v *analysis.View, f Filter) {
 	for _, u := range und {
 		fmt.Fprintf(w, "  %s listens on %s:%d (%s)\n", u.Endpoint.Display(), u.Addr, u.Port, u.Comm)
 	}
+	Section(w, st, "Blocked by NetworkPolicies / firewall")
+	Denials(w, st, v, f)
 	Section(w, st, "Internet egress")
 	ext := analysis.ExternalEgress(v)
 	if len(ext) == 0 {
@@ -662,6 +690,9 @@ func Security(w io.Writer, st Style, v *analysis.View, f Filter) {
 
 // Cost prints the cross-zone cost report.
 func Cost(w io.Writer, st Style, v *analysis.View) {
+	Section(w, st, "Rightsizing")
+	Rightsize(w, st, v, Filter{}, analysis.DefaultPricing)
+	Section(w, st, "Cross-zone traffic")
 	costs := analysis.CrossZoneCosts(v)
 	if len(costs) == 0 {
 		fmt.Fprintln(w, st.Dim("no cross-zone traffic observed (nodes need topology.kubernetes.io/zone labels)"))

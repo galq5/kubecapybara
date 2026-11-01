@@ -291,6 +291,9 @@ func (o *options) cmdStartup() *cobra.Command {
 				return fmt.Errorf("startup analysis needs Kubernetes metadata for %s", args[0])
 			}
 			rep := analysis.Startup(res.View, pod)
+			if evs, err := o.src.PodEvents(cmd.Context(), pod.Namespace, pod.UID); err == nil && len(evs) > 0 {
+				analysis.AddPodEvents(rep, evs)
+			}
 			if o.output == "json" {
 				return o.jsonOut(os.Stdout, rep)
 			}
@@ -487,5 +490,56 @@ func (o *options) cmdVersion(version string) *cobra.Command {
 		Use:   "version",
 		Short: "Print the version",
 		Run:   func(*cobra.Command, []string) { fmt.Println(version) },
+	}
+}
+
+func (o *options) cmdRightsize() *cobra.Command {
+	price := analysis.DefaultPricing
+	c := &cobra.Command{
+		Use:     "rightsize",
+		Aliases: []string{"rightsizing", "requests"},
+		Short:   "Compare measured CPU/memory with requests and limits: recommendations and savings",
+		Long:    "Use a long window (e.g. -w 6h): recommendations are based on the peak observed in the window.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.Rightsize(r.View, price) }, func(st render.Style, r *tui.Result) error {
+				render.Header(os.Stdout, st, r.View, o.src.Describe())
+				render.Rightsize(os.Stdout, st, r.View, o.filt(), price)
+				return nil
+			})
+		},
+	}
+	c.Flags().Float64Var(&price.CorePerHour, "cost-per-core-hour", price.CorePerHour, "USD per vCPU hour")
+	c.Flags().Float64Var(&price.GiBPerHour, "cost-per-gib-hour", price.GiBPerHour, "USD per GiB of memory per hour")
+	return c
+}
+
+func (o *options) cmdServices() *cobra.Command {
+	return &cobra.Command{
+		Use:     "services",
+		Aliases: []string{"svc", "balance"},
+		Short:   "How evenly each Service spreads connections over its backends",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.ServiceBalances(r.View) }, func(st render.Style, r *tui.Result) error {
+				render.Header(os.Stdout, st, r.View, o.src.Describe())
+				render.Services(os.Stdout, st, r.View, o.filt())
+				return nil
+			})
+		},
+	}
+}
+
+func (o *options) cmdOOM() *cobra.Command {
+	return &cobra.Command{
+		Use:   "oom",
+		Short: "Pods trending towards their memory limit, with time to OOM",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if o.window < 5*time.Minute {
+				o.window = 10 * time.Minute
+			}
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.OOMRisks(r.View) }, func(st render.Style, r *tui.Result) error {
+				render.OOMRisks(os.Stdout, st, r.View)
+				return nil
+			})
+		},
 	}
 }

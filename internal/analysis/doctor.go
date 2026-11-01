@@ -77,6 +77,8 @@ func Doctor(v *View, base *View) []Finding {
 		ruleRefused, ruleTimeouts, ruleRetrans, ruleMTU, ruleDrops, ruleConntrack, ruleConnErrors,
 		ruleChurn, ruleCrossZone, ruleAPIServer, ruleRunQ, ruleThrottle, ruleDisk, ruleHTTP,
 		ruleSecurity, ruleUndeclaredPorts, ruleExternalEgress, ruleCollectors,
+		ruleOOMRisk, rulePolicyDenials, ruleAcceptQueue, ruleZeroWindow, ruleSlowNodes,
+		ruleServiceBalance, ruleRightsizing,
 	}
 	for _, r := range rules {
 		out = append(out, r(v)...)
@@ -791,4 +793,162 @@ func firstLine(s string) string {
 		return s[:160] + "…"
 	}
 	return s
+}
+
+// ---------------------------------------------------------------- insights
+
+func ruleOOMRisk(v *View) []Finding {
+	var out []Finding
+	for _, r := range OOMRisks(v) {
+		if r.ETA > time.Hour {
+			continue
+		}
+		sev := SevWarn
+		if r.ETA < 15*time.Minute {
+			sev = SevCrit
+		}
+		out = append(out, Finding{Severity: sev, Category: "memory",
+			Title: fmt.Sprintf("%s will hit its memory limit in ~%s", r.Endpoint.Display(), r.ETA.Round(time.Minute)),
+			Detail: []string{fmt.Sprintf("%s of %s, growing %s/min (linear fit R²=%.2f)",
+				Bytes(float64(r.Current)), Bytes(float64(r.Limit)), Bytes(r.BytesPerSec*60), r.R2)},
+			Hint:     "a steady climb towards the limit usually means a leak or an unbounded cache; the OOM killer will restart the container",
+			Subjects: []string{r.Endpoint.ID}, Score: -r.ETA.Seconds()})
+	}
+	return out
+}
+
+func rulePolicyDenials(v *View) []Finding {
+	ds := PolicyDenials(v)
+	if len(ds) == 0 {
+		return nil
+	}
+	var total uint64
+	f := Finding{Severity: SevWarn, Category: "network",
+		Hint: "packets dropped by a NetworkPolicy / firewall rule: allow the flow if it is expected, otherwise find out why the client tries it"}
+	for _, d := range ds {
+		total += d.Count
+	}
+	for _, d := range top(ds, 10) {
+		f.Detail = append(f.Detail, fmt.Sprintf("%s → %s:%d/%s blocked %d times (%s)", d.Src.Display(), d.Dst.Display(), d.Port, d.Proto, d.Count, d.Reason))
+		f.Subjects = append(f.Subjects, d.Src.ID)
+	}
+	f.Title = fmt.Sprintf("%d packets blocked by packet filtering on %d path(s)", total, len(ds))
+	f.Score = float64(total)
+	return []Finding{f}
+}
+
+func ruleAcceptQueue(v *View) []Finding {
+	var over, slow []string
+	for _, e := range v.PodEntities() {
+		n := e.Stats.Net
+		if n == nil {
+			continue
+		}
+		if n.ListenOverflows+n.ListenDrops > 0 {
+			over = append(over, fmt.Sprintf("%s: %d accept queue overflows, %d SYNs dropped", e.Endpoint.Display(), n.ListenOverflows, n.ListenDrops))
+		}
+		if n.ZeroWindowDrops+n.RcvQueueDrops > 0 || n.ToZeroWindowAdv > 10 {
+			slow = append(slow, fmt.Sprintf("%s: closed its receive window %d times, %d packets dropped (zero window %d, receive queue %d)",
+				e.Endpoint.Display(), n.ToZeroWindowAdv, n.ZeroWindowDrops+n.RcvQueueDrops, n.ZeroWindowDrops, n.RcvQueueDrops))
+		}
+	}
+	var out []Finding
+	if len(over) > 0 {
+		sort.Strings(over)
+		out = append(out, Finding{Severity: SevWarn, Category: "network", Title: "servers too slow to accept new connections (accept queue overflow)",
+			Detail: top(over, 10), Hint: "clients see connect timeouts/retries; add replicas, accept faster (more acceptor threads) or raise the listen backlog and net.core.somaxconn",
+			Score: float64(len(over))})
+	}
+	if len(slow) > 0 {
+		sort.Strings(slow)
+		out = append(out, Finding{Severity: SevWarn, Category: "network", Title: "pods not reading their sockets fast enough (zero window)",
+			Detail: top(slow, 10), Hint: "the application is CPU starved, blocked, or receives faster than it processes; senders stall waiting for it",
+			Score: float64(len(slow))})
+	}
+	return out
+}
+
+func ruleZeroWindow(v *View) []Finding {
+	var lines []string
+	for _, e := range v.Edges {
+		if e.Stats.ZeroWindow >= 10 { // >= ~1s of stall (100ms samples)
+			lines = append(lines, fmt.Sprintf("%s: peer window closed for ~%s", edgeName(e), (time.Duration(e.Stats.ZeroWindow)*100*time.Millisecond).Round(100*time.Millisecond)))
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	sort.Strings(lines)
+	return []Finding{{Severity: SevWarn, Category: "network", Title: "transfers stalled by a slow receiver (zero window)", Detail: top(lines, 10),
+		Hint: "the side being written to is not consuming data; check its CPU, GC pauses or downstream backpressure", Score: float64(len(lines))}}
+}
+
+func ruleSlowNodes(v *View) []Finding {
+	m := BuildNodeMatrix(v)
+	slow := m.SlowNodes()
+	var out []Finding
+	for n, p50 := range slow {
+		out = append(out, Finding{Severity: SevWarn, Category: "network",
+			Title: fmt.Sprintf("node %s: network latency to other nodes is high (median RTT p50 %s)", n, Dur(p50)),
+			Hint:  "compare with `kubectl capybara nodes` (latency matrix): a single slow row/column points at that node's NIC, host network or overload",
+			Score: p50})
+	}
+	return out
+}
+
+func ruleServiceBalance(v *View) []Finding {
+	var lines []string
+	var score float64
+	for _, sb := range ServiceBalances(v) {
+		if sb.Imbalance < 2 || (!sb.ByBytes && sb.Total < 20) {
+			continue
+		}
+		busiest := sb.Backends[0]
+		unit := "connections"
+		if sb.ByBytes {
+			unit = "bytes"
+		}
+		lines = append(lines, fmt.Sprintf("svc/%s: %s gets %s of %s across %d backends (fair share %s)",
+			sb.Service, busiest.Pod.Display(), Pct(busiest.Share), unit, len(sb.Backends), Pct(1/float64(len(sb.Backends)))))
+		score += sb.Imbalance
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return []Finding{{Severity: SevWarn, Category: "network", Title: "uneven load balancing across Service backends", Detail: top(lines, 10),
+		Hint:  "long-lived connections (HTTP/2, gRPC, pooled clients) stick to one backend; use client-side balancing, a mesh, or cap connection age (e.g. gRPC MaxConnectionAge)",
+		Score: score}}
+}
+
+func ruleRightsizing(v *View) []Finding {
+	rows := Rightsize(v, DefaultPricing)
+	var over, under []string
+	var savings float64
+	for _, r := range rows {
+		switch r.Verdict {
+		case "over":
+			if r.MonthlyUSD >= 1 {
+				over = append(over, fmt.Sprintf("%s (%d pods): request %dm / %s, uses peak %.0fm / %s → %dm / %s, saves ≈ %s/month",
+					r.Workload, r.Pods, r.CPUReq, Bytes(float64(r.MemReq)), r.CPUPeak, Bytes(r.MemPeak), r.CPURec, Bytes(float64(r.MemRec)), Money(r.MonthlyUSD)))
+				savings += r.MonthlyUSD
+			}
+		case "under":
+			under = append(under, fmt.Sprintf("%s: peak %.0fm CPU vs request %dm, memory peak %s vs limit %s",
+				r.Workload, r.CPUPeak, r.CPUReq, Bytes(r.MemPeak), Bytes(float64(r.MemLim))))
+		}
+	}
+	var out []Finding
+	note := ""
+	if v.Seconds() < 3600 {
+		note = fmt.Sprintf(" (based on %s of data: use -w 1h or longer before changing requests)", time.Duration(v.Seconds()*float64(time.Second)).Round(time.Second))
+	}
+	if len(over) > 0 {
+		out = append(out, Finding{Severity: SevInfo, Category: "cost", Title: fmt.Sprintf("over-provisioned workloads: ≈ %s/month in unused requests%s", Money(savings), note),
+			Detail: top(over, 10), Hint: "`kubectl capybara rightsize` lists recommendations for every workload", Score: savings})
+	}
+	if len(under) > 0 {
+		out = append(out, Finding{Severity: SevWarn, Category: "cpu", Title: "workloads using more than they request (risk of throttling, eviction or OOM)",
+			Detail: top(under, 10), Hint: "raise requests to the observed peak so the scheduler places them correctly", Score: float64(len(under))})
+	}
+	return out
 }

@@ -60,22 +60,24 @@ type Pod struct {
 
 // Container is the subset of a container (spec + status) we need.
 type Container struct {
-	Name          string    `json:"name"`
-	ID            string    `json:"id,omitempty"`
-	Image         string    `json:"image,omitempty"`
-	Ports         []int32   `json:"ports,omitempty"`
-	Ready         bool      `json:"ready"`
-	Restarts      int32     `json:"restarts"`
-	State         string    `json:"state,omitempty"`
-	StateReason   string    `json:"stateReason,omitempty"`
-	StartedAt     time.Time `json:"startedAt,omitempty"`
-	LastReason    string    `json:"lastReason,omitempty"`
-	LastExitCode  int32     `json:"lastExitCode,omitempty"`
-	LastFinished  time.Time `json:"lastFinished,omitempty"`
-	MemLimit      int64     `json:"memLimit,omitempty"`
-	CPULimitMilli int64     `json:"cpuLimitMilli,omitempty"`
-	Init          bool      `json:"init,omitempty"`
-	Probes        []Probe   `json:"probes,omitempty"`
+	Name            string    `json:"name"`
+	ID              string    `json:"id,omitempty"`
+	Image           string    `json:"image,omitempty"`
+	Ports           []int32   `json:"ports,omitempty"`
+	Ready           bool      `json:"ready"`
+	Restarts        int32     `json:"restarts"`
+	State           string    `json:"state,omitempty"`
+	StateReason     string    `json:"stateReason,omitempty"`
+	StartedAt       time.Time `json:"startedAt,omitempty"`
+	LastReason      string    `json:"lastReason,omitempty"`
+	LastExitCode    int32     `json:"lastExitCode,omitempty"`
+	LastFinished    time.Time `json:"lastFinished,omitempty"`
+	MemLimit        int64     `json:"memLimit,omitempty"`
+	CPULimitMilli   int64     `json:"cpuLimitMilli,omitempty"`
+	MemRequest      int64     `json:"memRequest,omitempty"`
+	CPURequestMilli int64     `json:"cpuRequestMilli,omitempty"`
+	Init            bool      `json:"init,omitempty"`
+	Probes          []Probe   `json:"probes,omitempty"`
 }
 
 // Probe describes a liveness/readiness/startup probe.
@@ -301,6 +303,12 @@ func convertPod(p *corev1.Pod) *Pod {
 		if q, ok := c.Resources.Limits[corev1.ResourceCPU]; ok {
 			ct.CPULimitMilli = q.MilliValue()
 		}
+		if q, ok := c.Resources.Requests[corev1.ResourceMemory]; ok {
+			ct.MemRequest = q.Value()
+		}
+		if q, ok := c.Resources.Requests[corev1.ResourceCPU]; ok {
+			ct.CPURequestMilli = q.MilliValue()
+		}
 		for kind, pr := range map[string]*corev1.Probe{"liveness": c.LivenessProbe, "readiness": c.ReadinessProbe, "startup": c.StartupProbe} {
 			if pr == nil {
 				continue
@@ -387,6 +395,55 @@ func workloadOf(p *Pod) string {
 		}
 	}
 	return p.OwnerKind + "/" + p.OwnerName
+}
+
+// PodEvent is a Kubernetes Event about a pod (Scheduled, Pulling, Pulled...).
+type PodEvent struct {
+	Reason  string    `json:"reason"`
+	Message string    `json:"message"`
+	Type    string    `json:"type"`
+	First   time.Time `json:"first"`
+	Last    time.Time `json:"last"`
+	Count   int32     `json:"count"`
+}
+
+// LoadPodEvents lists the events of a pod, oldest first.
+func LoadPodEvents(ctx context.Context, cs kubernetes.Interface, ns, uid string) ([]PodEvent, error) {
+	list, err := cs.CoreV1().Events(ns).List(ctx, metav1.ListOptions{FieldSelector: "involvedObject.uid=" + uid})
+	if err != nil {
+		return nil, err
+	}
+	var out []PodEvent
+	for _, e := range list.Items {
+		first, last := e.FirstTimestamp.Time, e.LastTimestamp.Time
+		if first.IsZero() {
+			first = e.EventTime.Time
+		}
+		if first.IsZero() {
+			first = e.CreationTimestamp.Time
+		}
+		if last.IsZero() {
+			last = first
+		}
+		out = append(out, PodEvent{Reason: e.Reason, Message: e.Message, Type: e.Type, First: first, Last: last, Count: e.Count})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].First.Before(out[j].First) })
+	return out, nil
+}
+
+// PodRequests sums the CPU (millicores) and memory requests and limits of
+// the regular containers of a pod.
+func (p *Pod) Requests() (cpuReq, cpuLim, memReq, memLim int64) {
+	for _, c := range p.Containers {
+		if c.Init {
+			continue
+		}
+		cpuReq += c.CPURequestMilli
+		cpuLim += c.CPULimitMilli
+		memReq += c.MemRequest
+		memLim += c.MemLimit
+	}
+	return
 }
 
 // Index builds the lookup tables. It must be called after deserialising.

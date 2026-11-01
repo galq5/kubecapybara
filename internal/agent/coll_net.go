@@ -175,6 +175,7 @@ func (c *netCollector) Collect(w *Window) {
 			RstSent:      v.RstSent,
 			RstRcvd:      v.RstRcvd,
 			MTUReduced:   v.MtuReduced,
+			ZeroWindow:   v.ZeroWindow,
 		}
 		w.AddPair(p)
 	})

@@ -106,6 +106,7 @@ Run without arguments for the interactive dashboard.`,
 		o.cmdTop(), o.cmdDoctor(), o.cmdEdges(), o.cmdPods(), o.cmdPod(), o.cmdDNS(), o.cmdHTTP(), o.cmdNodes(),
 		o.cmdEvents(), o.cmdRollout(), o.cmdStartup(), o.cmdWhyCrash(), o.cmdSecurity(), o.cmdCost(),
 		o.cmdNetpol(), o.cmdProfile(), o.cmdSnapshot(), o.cmdVersion(version),
+		o.cmdRightsize(), o.cmdServices(), o.cmdOOM(),
 	)
 	return root
 }
