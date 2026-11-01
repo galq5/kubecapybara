@@ -543,3 +543,32 @@ func (o *options) cmdOOM() *cobra.Command {
 		},
 	}
 }
+
+func (o *options) cmdDB() *cobra.Command {
+	return &cobra.Command{
+		Use:     "db",
+		Aliases: []string{"queries", "sql"},
+		Short:   "Slowest and failing Postgres/MySQL/Redis statements per pod (agent --l7, plaintext only)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return r.View.Entities }, func(st render.Style, r *tui.Result) error {
+				render.Header(os.Stdout, st, r.View, o.src.Describe())
+				render.DB(os.Stdout, st, r.View, o.filt())
+				return nil
+			})
+		},
+	}
+}
+
+func (o *options) cmdFiles() *cobra.Command {
+	return &cobra.Command{
+		Use:   "files",
+		Short: "Which files pods wait on: slow reads, writes and fsyncs with filesystem type (agent --files)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return r.View.Entities }, func(st render.Style, r *tui.Result) error {
+				render.Header(os.Stdout, st, r.View, o.src.Describe())
+				render.Files(os.Stdout, st, r.View, o.filt())
+				return nil
+			})
+		},
+	}
+}

@@ -16,6 +16,7 @@ import (
 type Filter struct {
 	Text      string
 	Namespace string
+	entity    string
 }
 
 func (f Filter) match(parts ...string) bool {
@@ -32,7 +33,16 @@ func (f Filter) match(parts ...string) bool {
 }
 
 func (f Filter) ns(e analysis.Endpoint) bool {
+	if f.entity != "" {
+		return e.ID == f.entity
+	}
 	return f.Namespace == "" || e.Namespace == f.Namespace
+}
+
+// only restricts a filter to one entity.
+func (f Filter) only(id string) Filter {
+	f.entity = id
+	return f
 }
 
 func sev(st Style, s analysis.Severity) string {
@@ -355,6 +365,14 @@ func Pod(w io.Writer, st Style, v *analysis.View, id string) {
 	if len(s.HTTP) > 0 {
 		Section(w, st, "HTTP")
 		httpTable(w, st, v, s.HTTP)
+	}
+	if len(s.DB) > 0 {
+		Section(w, st, "Database calls")
+		DB(w, st, v, Filter{Text: ""}.only(id))
+	}
+	if len(s.Files) > 0 {
+		Section(w, st, "Slow file operations")
+		Files(w, st, v, Filter{}.only(id))
 	}
 	if len(s.ConnErrors) > 0 {
 		Section(w, st, "connect() errors")

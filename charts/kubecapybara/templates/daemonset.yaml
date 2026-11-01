@@ -73,6 +73,10 @@ spec:
             {{- if .Values.agent.l7 }}
             - --l7
             {{- end }}
+            {{- if .Values.agent.files }}
+            - --files
+            - --file-threshold={{ .Values.agent.fileThreshold }}
+            {{- end }}
             {{- with .Values.agent.disable }}
             - --disable={{ join "," . }}
             {{- end }}

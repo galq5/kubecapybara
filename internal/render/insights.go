@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -313,4 +314,82 @@ func HistBars(w io.Writer, st Style, h model.Hist) {
 		hi := math.Ldexp(1, i)
 		fmt.Fprintf(w, "  %8s – %-8s %s %d\n", analysis.Dur(math.Max(lo, 1)), analysis.Dur(hi), st.Accent(Bar(float64(h.B[i])/float64(maxV), 30)), h.B[i])
 	}
+}
+
+// DB prints client-side database statements per pod.
+func DB(w io.Writer, st Style, v *analysis.View, f Filter) {
+	type row struct {
+		e *analysis.EntityView
+		q *model.DBQuery
+	}
+	var rows []row
+	for _, e := range v.Entities {
+		if !f.ns(e.Endpoint) {
+			continue
+		}
+		for _, q := range e.Stats.DB {
+			if f.match(e.Endpoint.Display(), q.Query, q.Proto) {
+				rows = append(rows, row{e, q})
+			}
+		}
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(w, st.Dim("no plaintext Postgres/MySQL/Redis traffic observed (agent --l7; TLS connections are not visible)"))
+		return
+	}
+	// rank by total time spent waiting for the statement
+	sort.Slice(rows, func(i, j int) bool { return rows[i].q.Lat.Sum > rows[j].q.Lat.Sum })
+	t := &Table{Headers: []string{"CLIENT", "DB", "STATEMENT", "QPS", "ERRORS", "p50", "p99", "TIME/s"},
+		Right: map[int]bool{3: true, 4: true, 5: true, 6: true, 7: true}, MaxCol: 70}
+	for _, r := range rows {
+		q := r.q
+		errs := analysis.Pct(float64(q.Errors) / float64(q.Count))
+		if q.Errors > 0 {
+			errs = st.Warn(errs)
+		}
+		p99 := analysis.Dur(q.Lat.P99())
+		if q.Lat.P99() > 500e3 {
+			p99 = st.Warn(p99)
+		}
+		t.AddRow(r.e.Endpoint.Display(), q.Proto, q.Query, analysis.Rate(v.PerSec(q.Count)), errs,
+			analysis.Dur(q.Lat.P50()), p99, analysis.Dur(float64(q.Lat.Sum)/v.Seconds()))
+	}
+	t.Render(w, st)
+	fmt.Fprintln(w, st.Dim("TIME/s = time spent waiting for this statement per second (where the database time goes)"))
+}
+
+// Files prints slow file operations per pod.
+func Files(w io.Writer, st Style, v *analysis.View, f Filter) {
+	type row struct {
+		e  *analysis.EntityView
+		fs *model.FileStats
+	}
+	var rows []row
+	for _, e := range v.Entities {
+		if !f.ns(e.Endpoint) {
+			continue
+		}
+		for _, x := range e.Stats.Files {
+			if f.match(e.Endpoint.Display(), x.Path, x.FSType) {
+				rows = append(rows, row{e, x})
+			}
+		}
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(w, st.Dim("no slow file operations (agent --files, threshold --file-threshold)"))
+		return
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].fs.WaitNs > rows[j].fs.WaitNs })
+	t := &Table{Headers: []string{"POD", "FILE", "FS", "SLOW OPS", "READ/WRITE/FSYNC", "WAITED", "MAX"},
+		Right: map[int]bool{3: true, 5: true, 6: true}, MaxCol: 64}
+	for _, r := range rows {
+		x := r.fs
+		mx := analysis.Dur(float64(x.MaxNs) / 1e3)
+		if x.MaxNs > 500e6 {
+			mx = st.Warn(mx)
+		}
+		t.AddRow(r.e.Endpoint.Display(), x.Path, x.FSType, fmt.Sprint(x.Ops()), fmt.Sprintf("%d/%d/%d", x.Reads, x.Writes, x.Fsyncs),
+			analysis.Dur(float64(x.WaitNs)/1e3), mx)
+	}
+	t.Render(w, st)
 }

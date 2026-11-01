@@ -22,8 +22,12 @@ agent:
   fineRetention: 15m
   # -- 1-minute rollup history kept in memory.
   retention: 6h
-  # -- HTTP/1.x request tracing. Hooks every read/write syscall on the node.
+  # -- HTTP/1.x and plaintext Postgres/MySQL/Redis tracing. Hooks every read/write syscall on the node.
   l7: false
+  # -- Slow file operations (read/write/fsync on regular files). Hooks every read/write syscall.
+  files: false
+  # -- Report file operations slower than this.
+  fileThreshold: 10ms
   # -- Collectors to disable: net, drops, dns, sched, io, proc, cgroupfs, node, profile
   disable: []
   # -- Cluster DNS domain (used for ndots waste detection).

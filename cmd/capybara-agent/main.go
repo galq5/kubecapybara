@@ -34,7 +34,9 @@ func main() {
 	flag.StringVar(&cfg.CgroupRoot, "cgroup-root", "", "cgroup v2 mount point (autodetected)")
 	flag.StringVar(&cfg.HostPrefix, "host-prefix", "", "prefix where the host filesystem is mounted, used for cgroup autodetection (e.g. /host)")
 	flag.StringVar(&cfg.ProcRoot, "proc", "/proc", "host procfs (run with hostPID)")
-	flag.BoolVar(&cfg.EnableL7, "l7", false, "enable HTTP/1.x request tracing (hooks read/write syscalls)")
+	flag.BoolVar(&cfg.EnableL7, "l7", false, "enable HTTP/1.x and plaintext Postgres/MySQL/Redis request tracing (hooks read/write syscalls)")
+	flag.BoolVar(&cfg.EnableFiles, "files", false, "report slow file operations (read/write/fsync on regular files; hooks read/write syscalls)")
+	flag.DurationVar(&cfg.FileThreshold, "file-threshold", 10*time.Millisecond, "minimum duration of a file operation to report")
 	flag.StringVar(&disable, "disable", "", "comma separated collectors to disable (net,drops,dns,sched,io,proc,cgroupfs,node,profile)")
 	flag.StringVar(&cfg.ClusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster DNS domain")
 	var tokenFile string

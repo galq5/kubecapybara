@@ -29,6 +29,8 @@ type Config struct {
 	HostPrefix    string // where the host filesystem is mounted (e.g. /host)
 	ProcRoot      string // host /proc (requires hostPID)
 	EnableL7      bool
+	EnableFiles   bool          // time read/write/fsync on regular files
+	FileThreshold time.Duration // report file operations slower than this
 	Disable       map[string]bool
 	ClusterDomain string
 	Version       string
@@ -124,6 +126,11 @@ func New(cfg Config) (*Agent, error) {
 		a.collectors = append(a.collectors, &httpCollector{})
 	} else {
 		a.setStatus("http", "disabled (enable with --l7)")
+	}
+	if cfg.EnableFiles {
+		a.collectors = append(a.collectors, &filesCollector{})
+	} else {
+		a.setStatus("files", "disabled (enable with --files)")
 	}
 	a.log.Info("cgroup v2 root", "path", root)
 	return a, nil

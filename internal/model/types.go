@@ -126,7 +126,61 @@ type EntityStats struct {
 	HTTP       map[string]*HTTPEndpoint `json:"http,omitempty"`
 	ConnErrors map[string]uint64        `json:"connErrors,omitempty"`
 	Net        *NetStats                `json:"net,omitempty"`
+	DB         map[string]*DBQuery      `json:"db,omitempty"`    // proto|query
+	Files      map[string]*FileStats    `json:"files,omitempty"` // path
 }
+
+// DBQuery aggregates client-side database requests of one statement shape.
+type DBQuery struct {
+	Proto  string `json:"proto"` // postgres, mysql, redis
+	Query  string `json:"query"` // normalized statement or command
+	Count  uint64 `json:"count"`
+	Errors uint64 `json:"errors,omitempty"`
+	Lat    Hist   `json:"lat"`
+}
+
+// Merge adds o into q.
+func (q *DBQuery) Merge(o *DBQuery) {
+	q.Count += o.Count
+	q.Errors += o.Errors
+	q.Lat.Add(o.Lat)
+}
+
+// FileStats aggregates slow operations on one file.
+type FileStats struct {
+	Path   string `json:"path"`
+	FSType string `json:"fs,omitempty"`
+	Reads  uint64 `json:"reads,omitempty"`
+	Writes uint64 `json:"writes,omitempty"`
+	Fsyncs uint64 `json:"fsyncs,omitempty"`
+	WaitNs uint64 `json:"waitNs"`
+	MaxNs  uint64 `json:"maxNs"`
+	Bytes  uint64 `json:"bytes,omitempty"`
+}
+
+// Merge adds o into f.
+func (f *FileStats) Merge(o *FileStats) {
+	f.Reads += o.Reads
+	f.Writes += o.Writes
+	f.Fsyncs += o.Fsyncs
+	f.WaitNs += o.WaitNs
+	f.Bytes += o.Bytes
+	if o.MaxNs > f.MaxNs {
+		f.MaxNs = o.MaxNs
+	}
+	if f.FSType == "" {
+		f.FSType = o.FSType
+	}
+}
+
+// Ops returns the number of slow operations.
+func (f *FileStats) Ops() uint64 { return f.Reads + f.Writes + f.Fsyncs }
+
+// MaxDBQueries and MaxFiles bound per-entity cardinality.
+const (
+	MaxDBQueries = 200
+	MaxFiles     = 100
+)
 
 // NetStats are TCP counters of a pod's network namespace (TcpExt, deltas).
 type NetStats struct {
@@ -213,6 +267,34 @@ func (e *EntityStats) Merge(o *EntityStats) {
 			e.Net = &NetStats{}
 		}
 		e.Net.Merge(o.Net)
+	}
+	for k, v := range o.DB {
+		if e.DB == nil {
+			e.DB = map[string]*DBQuery{}
+		}
+		cur, ok := e.DB[k]
+		if !ok {
+			if len(e.DB) >= MaxDBQueries {
+				continue
+			}
+			cur = &DBQuery{Proto: v.Proto, Query: v.Query}
+			e.DB[k] = cur
+		}
+		cur.Merge(v)
+	}
+	for k, v := range o.Files {
+		if e.Files == nil {
+			e.Files = map[string]*FileStats{}
+		}
+		cur, ok := e.Files[k]
+		if !ok {
+			if len(e.Files) >= MaxFiles {
+				continue
+			}
+			cur = &FileStats{Path: v.Path}
+			e.Files[k] = cur
+		}
+		cur.Merge(v)
 	}
 }
 

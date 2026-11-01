@@ -78,7 +78,7 @@ func Doctor(v *View, base *View) []Finding {
 		ruleChurn, ruleCrossZone, ruleAPIServer, ruleRunQ, ruleThrottle, ruleDisk, ruleHTTP,
 		ruleSecurity, ruleUndeclaredPorts, ruleExternalEgress, ruleCollectors,
 		ruleOOMRisk, rulePolicyDenials, ruleAcceptQueue, ruleZeroWindow, ruleSlowNodes,
-		ruleServiceBalance, ruleRightsizing,
+		ruleServiceBalance, ruleRightsizing, ruleDB, ruleFiles,
 	}
 	for _, r := range rules {
 		out = append(out, r(v)...)
@@ -951,4 +951,57 @@ func ruleRightsizing(v *View) []Finding {
 			Detail: top(under, 10), Hint: "raise requests to the observed peak so the scheduler places them correctly", Score: float64(len(under))})
 	}
 	return out
+}
+
+func ruleDB(v *View) []Finding {
+	var errLines, slowLines []string
+	var score float64
+	for _, e := range v.Entities {
+		for _, q := range e.Stats.DB {
+			if q.Count < 10 {
+				continue
+			}
+			if r := ratio(float64(q.Errors), float64(q.Count)); r > 0.01 {
+				errLines = append(errLines, fmt.Sprintf("%s %s: %s errors (%d/%d) %s", e.Endpoint.Display(), q.Proto, Pct(r), q.Errors, q.Count, q.Query))
+				score += r * 10
+			}
+			if p99 := q.Lat.P99(); p99 > 500e3 {
+				slowLines = append(slowLines, fmt.Sprintf("%s %s: p99 %s, %s/s: %s", e.Endpoint.Display(), q.Proto, Dur(p99), Rate(v.PerSec(q.Count)), q.Query))
+				score += p99 / 1e6
+			}
+		}
+	}
+	var out []Finding
+	if len(errLines) > 0 {
+		sort.Strings(errLines)
+		out = append(out, Finding{Severity: SevWarn, Category: "db", Title: "database requests failing", Detail: top(errLines, 10),
+			Hint: "check the database logs for these statements (constraint violations, timeouts, permission errors)", Score: score})
+	}
+	if len(slowLines) > 0 {
+		sort.Strings(slowLines)
+		out = append(out, Finding{Severity: SevWarn, Category: "db", Title: "slow database statements (p99 > 500ms)", Detail: top(slowLines, 10),
+			Hint: "`kubectl capybara db` ranks statements by total time; look for missing indexes, lock waits or N+1 patterns", Score: score})
+	}
+	return out
+}
+
+func ruleFiles(v *View) []Finding {
+	var lines []string
+	var score float64
+	for _, e := range v.Entities {
+		for _, f := range e.Stats.Files {
+			if f.WaitNs < 1e9 && f.MaxNs < 500e6 {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("%s waited %s on %s (%s, %d slow ops, max %s)",
+				e.Endpoint.Display(), Dur(float64(f.WaitNs)/1e3), f.Path, f.FSType, f.Ops(), Dur(float64(f.MaxNs)/1e3)))
+			score += float64(f.WaitNs) / 1e9
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	sort.Strings(lines)
+	return []Finding{{Severity: SevWarn, Category: "disk", Title: "pods blocked on slow file operations", Detail: top(lines, 10),
+		Hint: "network filesystems (nfs, cifs) and throttled cloud volumes are the usual cause; fsync-heavy apps suffer most", Score: score}}
 }

@@ -566,10 +566,14 @@ func (m *model) renderText(b *bytes.Buffer) {
 		render.DNS(b, st, v, f)
 	case "HTTP":
 		render.HTTP(b, st, v, f)
+		render.Section(b, st, "Database calls (plaintext Postgres / MySQL / Redis)")
+		render.DB(b, st, v, f)
 	case "Nodes":
 		render.Nodes(b, st, v, f)
 		render.Section(b, st, "Memory trending to OOM")
 		render.OOMRisks(b, st, v)
+		render.Section(b, st, "Slow file operations")
+		render.Files(b, st, v, f)
 	case "Events":
 		render.Events(b, st, v, f, nil, 500)
 	case "Security":

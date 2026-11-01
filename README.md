@@ -42,6 +42,8 @@ HTML frames; any headless browser turns them into PNGs).
 | Why is startup slow? | `startup <pod>` | Timeline from pod creation → scheduling → container start → DNS lookups → connects → `listen()` → probes → Ready, with advice |
 | What does it talk to? | `edges -f <name>` | Live dependency map including external hosts by name (learned from DNS answers) |
 | HTTP errors/latency? | `http` | HTTP/1.x rate, errors, latency per route without sidecars (opt-in `--l7`) |
+| Which queries are slow? | `db` | Plaintext Postgres (simple + extended protocol), MySQL and Redis statements per pod: rate, errors, p50/p99, time spent (opt-in `--l7`) |
+| Which files is my pod waiting on? | `files` | Slow read/write/fsync on regular files with filesystem type (nfs, ext4, xfs…) (opt-in `--files`) |
 | Is anything shady going on? | `security` | Interactive `kubectl exec` sessions, shells spawned by app processes, undeclared listening ports, internet egress |
 | What does cross-AZ traffic cost? | `cost` | Bytes per workload pair across zones × price |
 | Are my requests right? | `rightsize` | Measured CPU (5s samples) and memory peaks vs requests/limits per workload, recommendations and $/month |

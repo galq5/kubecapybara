@@ -10,6 +10,11 @@
  *   server role: request read()   -> response write()
  *   client role: request write()  -> response read()
  *
+ * The same hooks also time plaintext database requests made by clients:
+ * PostgreSQL (simple 'Q' and extended 'P'/'B' messages), MySQL (COM_QUERY)
+ * and Redis (RESP arrays). The latency is from the request write() to the
+ * first read() on the same connection.
+ *
  * TLS traffic is invisible to this collector. Because it hooks every
  * read/write syscall on the node it is opt-in (agent flag --l7).
  */
@@ -21,6 +26,11 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #define ROLE_SERVER 2
 #define REQ_MAX 96
 #define RESP_MAX 16
+
+#define PROTO_HTTP 1
+#define PROTO_POSTGRES 2
+#define PROTO_REDIS 3
+#define PROTO_MYSQL 4
 
 /* layout shared by syscalls:sys_enter_* tracepoints: args start at offset 16 */
 struct sys_enter_ctx {
@@ -49,7 +59,8 @@ struct conn_key {
 struct pending_req {
 	__u64 ts;
 	__u8 role;
-	__u8 _pad[7];
+	__u8 proto;
+	__u8 _pad[6];
 	char req[REQ_MAX];
 };
 
@@ -59,7 +70,8 @@ struct http_event {
 	__u64 latency_ns;
 	__u32 pid;
 	__u8 role;
-	__u8 _pad[3];
+	__u8 proto;
+	__u8 _pad[2];
 	char req[REQ_MAX];
 	char resp[RESP_MAX];
 };
@@ -116,6 +128,40 @@ static __always_inline int is_response(const char *b)
 	return b[0] == 'H' && b[1] == 'T' && b[2] == 'T' && b[3] == 'P' && b[4] == '/';
 }
 
+/* database client requests (only checked for writes) */
+static __always_inline __u8 db_proto(const char *b, __u32 n)
+{
+	__u8 b0 = b[0], b1 = b[1], b2 = b[2], b3 = b[3], b4 = b[4];
+
+	/* PostgreSQL: type byte + big endian int32 length (< 16MiB) */
+	if ((b0 == 'Q' || b0 == 'P' || b0 == 'B') && b1 == 0 && (b2 | b3 | b4) != 0)
+		return PROTO_POSTGRES;
+	/* Redis RESP array: "*<n>\r\n$" */
+	if (b0 == '*' && b1 >= '1' && b1 <= '9' && (b2 == '\r' || (b2 >= '0' && b2 <= '9')))
+		return PROTO_REDIS;
+	/* MySQL: 3 byte LE length, sequence 0, COM_QUERY */
+	if (b3 == 0 && b4 == 0x03 && (b0 | b1 | b2) != 0)
+		return PROTO_MYSQL;
+	return 0;
+}
+
+static __always_inline void emit(struct pending_req *p, struct pending_req *resp, __u32 tgid)
+{
+	struct http_event *ev = bpf_ringbuf_reserve(&http_events, sizeof(*ev), 0);
+
+	if (!ev)
+		return;
+	ev->ts = bpf_ktime_get_ns();
+	ev->cgroup = bpf_get_current_cgroup_id();
+	ev->latency_ns = ev->ts - p->ts;
+	ev->pid = tgid;
+	ev->role = p->role;
+	ev->proto = p->proto;
+	__builtin_memcpy(ev->req, p->req, REQ_MAX);
+	__builtin_memcpy(ev->resp, resp->req, RESP_MAX);
+	bpf_ringbuf_submit(ev, 0);
+}
+
 static __always_inline void on_data(__u32 fd, __u64 buf, __s64 len, int is_read)
 {
 	__u32 zero = 0;
@@ -124,7 +170,8 @@ static __always_inline void on_data(__u32 fd, __u64 buf, __s64 len, int is_read)
 	struct pending_req *req;
 	__u32 n;
 
-	if (len < 8 || !buf)
+	/* DB replies can be tiny (redis "+OK\r\n") */
+	if (len < 1 || !buf)
 		return;
 	req = bpf_map_lookup_elem(&scratch, &zero);
 	if (!req)
@@ -140,29 +187,40 @@ static __always_inline void on_data(__u32 fd, __u64 buf, __s64 len, int is_read)
 	if (is_request(req->req)) {
 		req->ts = bpf_ktime_get_ns();
 		req->role = is_read ? ROLE_SERVER : ROLE_CLIENT;
+		req->proto = PROTO_HTTP;
 		bpf_map_update_elem(&pending, &key, req, BPF_ANY);
 		return;
 	}
 	if (is_response(req->req)) {
 		struct pending_req *p = bpf_map_lookup_elem(&pending, &key);
-		struct http_event *ev;
 
-		if (!p)
+		if (!p || p->proto != PROTO_HTTP)
 			return;
 		/* server answers with write(), client receives with read() */
 		if ((p->role == ROLE_SERVER && is_read) || (p->role == ROLE_CLIENT && !is_read))
 			return;
-		ev = bpf_ringbuf_reserve(&http_events, sizeof(*ev), 0);
-		if (ev) {
-			ev->ts = bpf_ktime_get_ns();
-			ev->cgroup = bpf_get_current_cgroup_id();
-			ev->latency_ns = ev->ts - p->ts;
-			ev->pid = key.tgid;
-			ev->role = p->role;
-			__builtin_memcpy(ev->req, p->req, REQ_MAX);
-			__builtin_memcpy(ev->resp, req->req, RESP_MAX);
-			bpf_ringbuf_submit(ev, 0);
+		emit(p, req, key.tgid);
+		bpf_map_delete_elem(&pending, &key);
+		return;
+	}
+	if (!is_read) {
+		__u8 proto = db_proto(req->req, n);
+
+		if (proto) {
+			req->ts = bpf_ktime_get_ns();
+			req->role = ROLE_CLIENT;
+			req->proto = proto;
+			bpf_map_update_elem(&pending, &key, req, BPF_ANY);
 		}
+		return;
+	}
+	/* first bytes read after a database request: the reply */
+	{
+		struct pending_req *p = bpf_map_lookup_elem(&pending, &key);
+
+		if (!p || p->proto == PROTO_HTTP)
+			return;
+		emit(p, req, key.tgid);
 		bpf_map_delete_elem(&pending, &key);
 	}
 }

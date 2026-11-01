@@ -154,7 +154,49 @@ func statusClass(code int) string {
 	return fmt.Sprintf("%dxx", code/100)
 }
 
+func (c *httpCollector) handleDB(ev *bpf.HttpHttpEvent) {
+	name, ok := protoNames[ev.Proto]
+	if !ok {
+		return
+	}
+	query := ParseDBRequest(ev.Proto, cbytes(ev.Req[:]))
+	failed := DBError(ev.Proto, cbytes(ev.Resp[:]))
+	entity := c.a.resolver.Entity(ev.Cgroup)
+	latUs := ev.LatencyNs / 1000
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := c.cur.Entity(entity)
+	if e.DB == nil {
+		e.DB = map[string]*model.DBQuery{}
+	}
+	k := dbKey(ev.Proto, query)
+	q, ok := e.DB[k]
+	if !ok {
+		if len(e.DB) >= model.MaxDBQueries {
+			k = dbKey(ev.Proto, "(other)")
+			q = e.DB[k]
+		}
+		if q == nil {
+			q = &model.DBQuery{Proto: name, Query: query}
+			if len(e.DB) >= model.MaxDBQueries {
+				q.Query = "(other)"
+			}
+			e.DB[k] = q
+		}
+	}
+	q.Count++
+	q.Lat.Observe(latUs)
+	if failed {
+		q.Errors++
+	}
+}
+
 func (c *httpCollector) handle(ev *bpf.HttpHttpEvent) {
+	if ev.Proto != protoHTTP && ev.Proto != 0 {
+		c.handleDB(ev)
+		return
+	}
 	method, path, ok := ParseRequestLine(cbytes(ev.Req[:]))
 	if !ok {
 		return

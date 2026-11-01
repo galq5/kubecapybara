@@ -26,17 +26,19 @@ type HttpHttpEvent struct {
 	LatencyNs uint64
 	Pid       uint32
 	Role      uint8
-	Pad       [3]uint8
+	Proto     uint8
+	Pad       [2]uint8
 	Req       [96]int8
 	Resp      [16]int8
 }
 
 type HttpPendingReq struct {
-	_    structs.HostLayout
-	Ts   uint64
-	Role uint8
-	Pad  [7]uint8
-	Req  [96]int8
+	_     structs.HostLayout
+	Ts    uint64
+	Role  uint8
+	Proto uint8
+	Pad   [6]uint8
+	Req   [96]int8
 }
 
 type HttpReadArgs struct {

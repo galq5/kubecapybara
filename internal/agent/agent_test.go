@@ -176,3 +176,30 @@ func TestTokenAuth(t *testing.T) {
 		t.Fatalf("metrics must stay open: %d", c)
 	}
 }
+
+func TestDBParsing(t *testing.T) {
+	pgQ := append([]byte{'Q', 0, 0, 0, 40}, []byte("SELECT * FROM users WHERE id = 42 AND name = 'bob'\x00")...)
+	if q := ParseDBRequest(protoPostgres, pgQ); q != "SELECT * FROM users WHERE id = ? AND name = ?" {
+		t.Errorf("pg Q: %q", q)
+	}
+	pgP := append([]byte{'P', 0, 0, 0, 40}, []byte("stmt1\x00INSERT INTO t (a, b) VALUES ($1, $2)\x00")...)
+	if q := ParseDBRequest(protoPostgres, pgP); q != "INSERT INTO t (a, b) VALUES ($?, $?)" {
+		t.Errorf("pg P: %q", q)
+	}
+	my := append([]byte{30, 0, 0, 0, 0x03}, []byte("select a from b where c in (1, 2, 3)")...)
+	if q := ParseDBRequest(protoMySQL, my); q != "select a from b where c IN (?)" {
+		t.Errorf("mysql: %q", q)
+	}
+	if q := ParseDBRequest(protoRedis, []byte("*2\r\n$3\r\nget\r\n$5\r\nmykey\r\n")); q != "GET" {
+		t.Errorf("redis: %q", q)
+	}
+	if !DBError(protoPostgres, []byte("E\x00\x00\x00")) || DBError(protoPostgres, []byte("T\x00")) {
+		t.Error("pg error detection")
+	}
+	if !DBError(protoRedis, []byte("-ERR wrong type")) || DBError(protoRedis, []byte("+OK")) {
+		t.Error("redis error detection")
+	}
+	if !DBError(protoMySQL, []byte{9, 0, 0, 1, 0xff, 0x15}) || DBError(protoMySQL, []byte{7, 0, 0, 1, 0x00}) {
+		t.Error("mysql error detection")
+	}
+}

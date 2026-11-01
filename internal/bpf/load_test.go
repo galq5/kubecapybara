@@ -18,7 +18,7 @@ func TestLoad(t *testing.T) {
 	_ = rlimit.RemoveMemlock()
 	loaders := map[string]func() (*ebpf.CollectionSpec, error){
 		"net": LoadNet, "drop": LoadDrop, "dns": LoadDns, "sched": LoadSched,
-		"io": LoadIo, "proc": LoadProc, "http": LoadHttp, "profile": LoadProfile,
+		"io": LoadIo, "proc": LoadProc, "http": LoadHttp, "profile": LoadProfile, "files": LoadFiles,
 	}
 	for name, load := range loaders {
 		t.Run(name, func(t *testing.T) {
