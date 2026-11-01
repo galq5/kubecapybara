@@ -46,6 +46,8 @@ type options struct {
 
 	agentToken       string
 	agentTokenSecret string
+	sloFile          string
+	slos             []analysis.SLO
 
 	src client.Source
 	cs  kubernetes.Interface
@@ -101,12 +103,14 @@ Run without arguments for the interactive dashboard.`,
 	pf.BoolVar(&o.noColor, "no-color", false, "disable colors")
 	pf.BoolVar(&o.noK8s, "no-k8s", false, "do not query the Kubernetes API for names (with --agent)")
 	pf.StringVarP(&o.filter, "filter", "f", "", "only show rows containing this text")
+	pf.StringVar(&o.sloFile, "slo-file", os.Getenv("CAPYBARA_SLO_FILE"), "YAML file with SLO definitions (default $CAPYBARA_SLO_FILE)")
 
 	root.AddCommand(
 		o.cmdTop(), o.cmdDoctor(), o.cmdEdges(), o.cmdPods(), o.cmdPod(), o.cmdDNS(), o.cmdHTTP(), o.cmdNodes(),
 		o.cmdEvents(), o.cmdRollout(), o.cmdStartup(), o.cmdWhyCrash(), o.cmdSecurity(), o.cmdCost(),
 		o.cmdNetpol(), o.cmdProfile(), o.cmdSnapshot(), o.cmdVersion(version),
 		o.cmdRightsize(), o.cmdServices(), o.cmdOOM(), o.cmdDB(), o.cmdFiles(),
+		o.cmdOutliers(), o.cmdSLO(), o.cmdPools(),
 	)
 	return root
 }
@@ -153,6 +157,13 @@ func (o *options) kubeClient() (kubernetes.Interface, error) {
 func (o *options) init() error {
 	if o.output != "text" && o.output != "json" {
 		return fmt.Errorf("unsupported output %q (text or json)", o.output)
+	}
+	if o.sloFile != "" {
+		slos, err := analysis.LoadSLOs(o.sloFile)
+		if err != nil {
+			return err
+		}
+		o.slos = slos
 	}
 	switch {
 	case o.fromFile != "":
@@ -242,7 +253,10 @@ func (o *options) load(ctx context.Context, withBase bool) (*tui.Result, error) 
 	if withBase && o.baseline > 0 {
 		res.Base = o.baselineView(ctx, from, meta)
 	}
-	res.Findings = analysis.Doctor(res.View, res.Base)
+	res.Findings = analysis.DoctorWith(res.View, res.Base, o.slos)
+	if len(o.slos) > 0 {
+		res.SLOs = analysis.EvaluateSLOs(res.View, res.Base, o.slos)
+	}
 	return res, nil
 }
 

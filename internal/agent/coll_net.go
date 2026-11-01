@@ -179,6 +179,7 @@ func (c *netCollector) Collect(w *Window) {
 		}
 		w.AddPair(p)
 	})
+	c.scanSockets(w)
 	drainMap(c.objs.ConnErrs, func(k bpf.NetConnErrKey, v *uint64) {
 		e := w.Entity(a.resolver.Entity(k.Cgroup))
 		if e.ConnErrors == nil {
@@ -208,6 +209,53 @@ func (c *netCollector) Collect(w *Window) {
 		}
 	}
 	c.mu.Unlock()
+}
+
+// idleAfter: a connection without received data for this long is idle.
+const idleAfter = 30 * time.Second
+
+// scanSockets counts established and idle connections per pair from the
+// kernel socket table (connection pool health).
+func (c *netCollector) scanSockets(w *Window) {
+	a := c.a
+	now := monoNow()
+	type cnt struct{ open, idle uint64 }
+	counts := map[bpf.NetPairKey]*cnt{}
+	var (
+		k  uint64
+		si bpf.NetSkInfo
+	)
+	it := c.objs.Socks.Iterate()
+	for it.Next(&k, &si) {
+		if si.HasKey == 0 || si.EstNs == 0 {
+			continue
+		}
+		x := counts[si.Key]
+		if x == nil {
+			x = &cnt{}
+			counts[si.Key] = x
+		}
+		x.open++
+		last := si.LastRttNs
+		if last == 0 {
+			last = si.EstNs
+		}
+		if now > last && now-last > uint64(idleAfter) {
+			x.idle++
+		}
+	}
+	for key, x := range counts {
+		side := "client"
+		if key.Side == 2 {
+			side = "server"
+		}
+		owner := "unknown"
+		if key.Cgroup != 0 {
+			owner = a.resolver.Entity(key.Cgroup)
+		}
+		w.AddPair(&model.Pair{Client: ip16(key.Saddr), Server: ip16(key.Daddr), Port: key.Dport, Side: side, Owner: owner,
+			OpenConns: x.open, IdleConns: x.idle})
+	}
 }
 
 func (c *netCollector) Close() error {

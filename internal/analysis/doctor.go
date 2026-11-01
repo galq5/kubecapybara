@@ -37,6 +37,9 @@ type Finding struct {
 	Hint     string   `json:"hint,omitempty"`
 	Subjects []string `json:"subjects,omitempty"` // entity IDs involved
 	Score    float64  `json:"score"`
+	// Rule identifies the rule that produced the finding (stable across
+	// runs, e.g. "dns-ndots"); used to track findings over time.
+	Rule string `json:"rule"`
 }
 
 // benign drop reasons that happen during normal operation
@@ -68,23 +71,49 @@ var badDrops = map[string]string{
 	"TCP_ZEROWINDOW":  "receiver advertised a zero window (slow consumer)",
 }
 
+// rule is a named doctor rule.
+type rule struct {
+	id string
+	fn func(*View) []Finding
+}
+
+var rules = []rule{
+	{"crash", ruleCrashes}, {"restarts", ruleRestarts}, {"memory", ruleOOMAndMemory}, {"dns-ndots", ruleNdots},
+	{"dns-errors", ruleDNSErrors}, {"dns-slow", ruleDNSSlow}, {"refused", ruleRefused}, {"connect-timeouts", ruleTimeouts},
+	{"retransmits", ruleRetrans}, {"mtu", ruleMTU}, {"drops", ruleDrops}, {"conntrack", ruleConntrack},
+	{"connect-errors", ruleConnErrors}, {"churn", ruleChurn}, {"cross-zone", ruleCrossZone}, {"apiserver-load", ruleAPIServer},
+	{"cpu-runqueue", ruleRunQ}, {"cpu-throttling", ruleThrottle}, {"disk-latency", ruleDisk}, {"http", ruleHTTP},
+	{"exec-shell", ruleSecurity}, {"undeclared-ports", ruleUndeclaredPorts}, {"internet-egress", ruleExternalEgress},
+	{"collectors", ruleCollectors}, {"oom-risk", ruleOOMRisk}, {"policy-denials", rulePolicyDenials},
+	{"accept-queue", ruleAcceptQueue}, {"zero-window", ruleZeroWindow}, {"slow-node", ruleSlowNodes},
+	{"service-balance", ruleServiceBalance}, {"rightsizing", ruleRightsizing}, {"db", ruleDB}, {"files", ruleFiles},
+	{"outlier-replica", ruleOutliers},
+}
+
 // Doctor runs all rules. base may be nil; when present regressions are
 // detected by comparing the current window with the baseline window.
-func Doctor(v *View, base *View) []Finding {
+func Doctor(v *View, base *View) []Finding { return DoctorWith(v, base, nil) }
+
+// DoctorWith runs all rules plus SLO burn rate checks.
+func DoctorWith(v *View, base *View, slos []SLO) []Finding {
 	var out []Finding
-	rules := []func(*View) []Finding{
-		ruleCrashes, ruleRestarts, ruleOOMAndMemory, ruleNdots, ruleDNSErrors, ruleDNSSlow,
-		ruleRefused, ruleTimeouts, ruleRetrans, ruleMTU, ruleDrops, ruleConntrack, ruleConnErrors,
-		ruleChurn, ruleCrossZone, ruleAPIServer, ruleRunQ, ruleThrottle, ruleDisk, ruleHTTP,
-		ruleSecurity, ruleUndeclaredPorts, ruleExternalEgress, ruleCollectors,
-		ruleOOMRisk, rulePolicyDenials, ruleAcceptQueue, ruleZeroWindow, ruleSlowNodes,
-		ruleServiceBalance, ruleRightsizing, ruleDB, ruleFiles,
+	add := func(id string, fs []Finding) {
+		for i := range fs {
+			if fs[i].Rule == "" {
+				fs[i].Rule = id
+			}
+		}
+		out = append(out, fs...)
 	}
 	for _, r := range rules {
-		out = append(out, r(v)...)
+		add(r.id, r.fn(v))
 	}
+	add("pools", rulePools(v, base))
 	if base != nil {
-		out = append(out, Regressions(v, base)...)
+		add("regression", Regressions(v, base))
+	}
+	if len(slos) > 0 {
+		add("slo-burn", SLOFindings(EvaluateSLOs(v, base, slos)))
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Severity != out[j].Severity {

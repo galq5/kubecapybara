@@ -576,3 +576,76 @@ func (o *options) cmdFiles() *cobra.Command {
 		},
 	}
 }
+
+func (o *options) cmdOutliers() *cobra.Command {
+	return &cobra.Command{
+		Use:     "outliers",
+		Aliases: []string{"replicas"},
+		Short:   "Replicas much worse than their siblings (latency, errors, RTT, CPU wait...)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if f := cmd.Flag("window"); f == nil || !f.Changed {
+				o.window = 5 * time.Minute
+			}
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.Outliers(r.View) }, func(st render.Style, r *tui.Result) error {
+				render.Header(os.Stdout, st, r.View, o.src.Describe())
+				render.Outliers(os.Stdout, st, r.View, o.filt())
+				return nil
+			})
+		},
+	}
+}
+
+func (o *options) cmdSLO() *cobra.Command {
+	return &cobra.Command{
+		Use:   "slo",
+		Short: "Error budget burn rates of SLOs defined in --slo-file",
+		Long: `SLOs are defined in a YAML file (--slo-file or $CAPYBARA_SLO_FILE):
+
+  slos:
+    - name: checkout
+      workload: shop/Deployment/checkout   # or: service: shop/checkout
+      availability: 99.5                   # % of requests without 5xx
+      latency: 300ms                       # threshold...
+      latencyObjective: 99                 # ...met by 99% of requests
+
+Burn rates are computed for --window (default 5m here) and the --baseline
+window (default 1h). HTTP/1.x data requires the agent's --l7 flag.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if f := cmd.Flag("window"); f == nil || !f.Changed {
+				o.window = 5 * time.Minute
+			}
+			res, err := o.load(cmd.Context(), true)
+			if err != nil {
+				return err
+			}
+			o.warn(res)
+			st := analysis.EvaluateSLOs(res.View, res.Base, o.slos)
+			if o.output == "json" {
+				return o.jsonOut(os.Stdout, st)
+			}
+			render.SLOs(os.Stdout, o.style(), st)
+			return nil
+		},
+	}
+}
+
+func (o *options) cmdPools() *cobra.Command {
+	return &cobra.Command{
+		Use:     "pools",
+		Aliases: []string{"connections"},
+		Short:   "Connection pools: open and idle connections per client and dependency, connect storms",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			res, err := o.load(cmd.Context(), true)
+			if err != nil {
+				return err
+			}
+			o.warn(res)
+			if o.output == "json" {
+				return o.jsonOut(os.Stdout, analysis.Pools(res.View, res.Base))
+			}
+			render.Header(os.Stdout, o.style(), res.View, o.src.Describe())
+			render.Pools(os.Stdout, o.style(), res.View, res.Base, o.filt())
+			return nil
+		},
+	}
+}

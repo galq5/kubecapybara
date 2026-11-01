@@ -132,6 +132,26 @@ func (h Hist) Quantile(q float64) float64 {
 	return hi
 }
 
+// FractionBelow estimates the share of samples below us microseconds
+// (linear interpolation within the bucket containing us).
+func (h Hist) FractionBelow(us float64) float64 {
+	var total, below float64
+	for i, v := range h.B {
+		total += float64(v)
+		lo, hi := bounds(i)
+		switch {
+		case hi <= us:
+			below += float64(v)
+		case lo < us:
+			below += float64(v) * (us - lo) / (hi - lo)
+		}
+	}
+	if total == 0 {
+		return 1
+	}
+	return below / total
+}
+
 // P50, P90 and P99 are shorthands in microseconds.
 func (h Hist) P50() float64 { return h.Quantile(0.50) }
 func (h Hist) P90() float64 { return h.Quantile(0.90) }

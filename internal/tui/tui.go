@@ -30,6 +30,7 @@ type Result struct {
 	Base     *analysis.View
 	Findings []analysis.Finding
 	Warnings []string
+	SLOs     []analysis.SLOStatus
 }
 
 // Loader fetches fresh data.
@@ -549,6 +550,11 @@ func (m *model) renderText(b *bytes.Buffer) {
 		for _, w := range m.res.Warnings {
 			fmt.Fprintln(b, st.Warn("! "+w))
 		}
+		if len(m.res.SLOs) > 0 {
+			render.Section(b, st, "SLOs")
+			render.SLOs(b, st, m.res.SLOs)
+			fmt.Fprintln(b)
+		}
 		render.Doctor(b, st, m.res.Findings, f)
 		render.Section(b, st, "Slowest paths (RTT p99)")
 		render.Edges(b, st, v, f, "rtt", 8)
@@ -572,6 +578,10 @@ func (m *model) renderText(b *bytes.Buffer) {
 		fmt.Fprintln(b, st.Dim("\nesc: back to the list"))
 	case "Services":
 		render.Services(b, st, v, f)
+		render.Section(b, st, "Replicas worse than their siblings")
+		render.Outliers(b, st, v, f)
+		render.Section(b, st, "Connection pools")
+		render.Pools(b, st, v, m.res.Base, f)
 	case "DNS":
 		render.DNS(b, st, v, f)
 	case "HTTP":

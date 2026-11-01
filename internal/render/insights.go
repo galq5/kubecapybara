@@ -395,3 +395,104 @@ func Files(w io.Writer, st Style, v *analysis.View, f Filter) {
 	}
 	t.Render(w, st)
 }
+
+// Outliers prints replicas much worse than their siblings.
+func Outliers(w io.Writer, st Style, v *analysis.View, f Filter) {
+	outs := analysis.Outliers(v)
+	if len(outs) == 0 {
+		fmt.Fprintln(w, st.Dim("no outlier replicas (workloads need 3+ active pods)"))
+		return
+	}
+	t := &Table{Headers: []string{"WORKLOAD", "POD", "NODE", "METRIC", "POD VALUE", "SIBLINGS (MEDIAN)", "×"},
+		Right: map[int]bool{4: true, 5: true, 6: true}, MaxCol: 48}
+	for _, o := range outs {
+		if !f.match(o.Workload, o.Pod.Display(), o.Metric) || !f.ns(o.Pod) {
+			continue
+		}
+		t.AddRow(o.Workload, o.Pod.Display(), o.Pod.Node, o.Metric, st.Warn(o.Format(o.Value)),
+			fmt.Sprintf("%s (%d)", o.Format(o.Median), o.Siblings), fmt.Sprintf("%.1f", o.Factor()))
+	}
+	t.Render(w, st)
+	for n, wls := range analysis.OutlierNodes(outs) {
+		fmt.Fprintf(w, "%s node %s hosts outliers of %s: suspect the node, not the apps\n", st.Crit("!"), n, strings.Join(wls, ", "))
+	}
+}
+
+// SLOs prints burn rates of service level objectives.
+func SLOs(w io.Writer, st Style, statuses []analysis.SLOStatus) {
+	if len(statuses) == 0 {
+		fmt.Fprintln(w, st.Dim("no SLOs defined (--slo-file slos.yaml, see `kubectl capybara slo --help`)"))
+		return
+	}
+	t := &Table{Headers: []string{"SLO", "TARGET", "REQUESTS", "AVAILABILITY", "UNDER LATENCY", "BURN NOW", "BURN BASELINE", "BUDGET GONE IN"},
+		Right: map[int]bool{2: true, 3: true, 4: true, 5: true, 6: true, 7: true}}
+	for _, s := range statuses {
+		target := ""
+		if s.Availability > 0 {
+			target = fmt.Sprintf("%.2f%%", s.Availability)
+		}
+		if s.Latency > 0 {
+			if target != "" {
+				target += ", "
+			}
+			target += fmt.Sprintf("%.1f%% < %s", s.LatencyObjective, s.Latency)
+		}
+		avail, under, burn, base, gone := "-", "-", "-", "-", "-"
+		if s.Requests > 0 {
+			avail = fmt.Sprintf("%.3f%%", 100*(1-float64(s.Errors)/float64(s.Requests)))
+			if s.Latency > 0 {
+				under = fmt.Sprintf("%.2f%%", 100*(1-s.Slow/float64(s.Requests)))
+			}
+			burn = fmt.Sprintf("%.1fx", s.Burn())
+			switch {
+			case s.Burn() >= 14.4:
+				burn = st.Crit(burn)
+			case s.Burn() >= 6:
+				burn = st.Warn(burn)
+			case s.Burn() <= 1:
+				burn = st.OK(burn)
+			}
+			if s.Burn() > 0 {
+				gone = (time.Duration(float64(30*24*time.Hour) / s.Burn())).Round(time.Hour).String()
+			}
+		}
+		if s.HasBase {
+			base = fmt.Sprintf("%.1fx", s.BaseBurn())
+		}
+		t.AddRow(s.Name, target, fmt.Sprint(s.Requests), avail, under, burn, base, gone)
+	}
+	t.Render(w, st)
+	fmt.Fprintln(w, st.Dim("burn 1x = spending the error budget exactly over 30 days; ≥14.4x in both windows pages, ≥6x warns"))
+}
+
+// Pools prints connection pools per client workload and dependency.
+func Pools(w io.Writer, st Style, v *analysis.View, base *analysis.View, f Filter) {
+	pools := analysis.Pools(v, base)
+	if len(pools) == 0 {
+		fmt.Fprintln(w, st.Dim("no client connections observed"))
+		return
+	}
+	t := &Table{Headers: []string{"CLIENT", "DEPENDENCY", "PORT", "PODS", "OPEN", "IDLE", "PER POD", "NEW CONN/s", "BASELINE/s"},
+		Right: map[int]bool{2: true, 3: true, 4: true, 5: true, 6: true, 7: true, 8: true}, MaxCol: 48}
+	for _, p := range pools {
+		if !f.match(p.Client, p.Server) || (f.Namespace != "" && !strings.HasPrefix(p.Client, f.Namespace+"/")) {
+			continue
+		}
+		idle := fmt.Sprint(p.Idle)
+		if p.Idle >= 50*uint64(max(p.Pods, 1)) {
+			idle = st.Warn(idle)
+		}
+		rate := analysis.Rate(p.ConnPerSec)
+		if p.BaseRate > 0 && p.ConnPerSec >= 20 && p.ConnPerSec > 5*p.BaseRate {
+			rate = st.Crit(rate)
+		}
+		baseRate := "-"
+		if base != nil {
+			baseRate = analysis.Rate(p.BaseRate)
+		}
+		t.AddRow(p.Client, p.Server, fmt.Sprint(p.Port), fmt.Sprint(p.Pods), fmt.Sprint(p.Open), idle,
+			fmt.Sprintf("%.0f", float64(p.Open)/float64(max(p.Pods, 1))), rate, baseRate)
+	}
+	t.Render(w, st)
+	fmt.Fprintln(w, st.Dim("idle = no data received for 30s; open/idle are the highest values in the window"))
+}

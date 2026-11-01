@@ -68,6 +68,10 @@ type Pair struct {
 	// ZeroWindow counts 100ms samples in which the server/peer advertised a
 	// zero receive window (it was not reading fast enough).
 	ZeroWindow uint64 `json:"zeroWindow,omitempty"`
+	// OpenConns / IdleConns are gauges (highest value in the range):
+	// established connections and those without received data for 30s.
+	OpenConns uint64 `json:"openConns,omitempty"`
+	IdleConns uint64 `json:"idleConns,omitempty"`
 }
 
 // PairKey identifies a Pair.
@@ -100,6 +104,12 @@ func (p *Pair) Add(o *Pair) {
 	p.RstRcvd += o.RstRcvd
 	p.MTUReduced += o.MTUReduced
 	p.ZeroWindow += o.ZeroWindow
+	if o.OpenConns > p.OpenConns {
+		p.OpenConns = o.OpenConns
+	}
+	if o.IdleConns > p.IdleConns {
+		p.IdleConns = o.IdleConns
+	}
 }
 
 // Clone returns a deep copy.
