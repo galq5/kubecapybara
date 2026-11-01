@@ -37,6 +37,8 @@ func main() {
 	flag.BoolVar(&cfg.EnableL7, "l7", false, "enable HTTP/1.x request tracing (hooks read/write syscalls)")
 	flag.StringVar(&disable, "disable", "", "comma separated collectors to disable (net,drops,dns,sched,io,proc,cgroupfs,node,profile)")
 	flag.StringVar(&cfg.ClusterDomain, "cluster-domain", "cluster.local", "Kubernetes cluster DNS domain")
+	var tokenFile string
+	flag.StringVar(&tokenFile, "token-file", "", "file with the API token (default: $CAPYBARA_TOKEN); empty disables API authentication")
 	flag.BoolVar(&debug, "debug", false, "debug logging")
 	flag.BoolVar(&showVer, "version", false, "print version and exit")
 	flag.Parse()
@@ -51,6 +53,15 @@ func main() {
 	}
 	cfg.Log = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 	cfg.Version = version
+	cfg.Token = strings.TrimSpace(os.Getenv("CAPYBARA_TOKEN"))
+	if tokenFile != "" {
+		b, err := os.ReadFile(tokenFile)
+		if err != nil {
+			cfg.Log.Error("reading token file", "err", err)
+			os.Exit(1)
+		}
+		cfg.Token = strings.TrimSpace(string(b))
+	}
 	cfg.Disable = map[string]bool{}
 	for _, d := range strings.Split(disable, ",") {
 		if d = strings.TrimSpace(d); d != "" {

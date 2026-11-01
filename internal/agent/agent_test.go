@@ -1,6 +1,8 @@
 package agent
 
 import (
+	"fmt"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -39,16 +41,18 @@ func TestStoreRollupsAndQuery(t *testing.T) {
 	end := base.Add(10 * time.Minute)
 	// recent: served from fine windows
 	q := s.Query(end.Add(-time.Minute), end)
-	if got := q.Pairs[model.PairKey{Client: "a", Server: "b", Port: 80, Side: "client", Owner: "x"}].Connects; got < 11 || got > 13 {
-		t.Fatalf("last minute connects = %d, want ~12", got)
+	if got := q.Pairs[model.PairKey{Client: "a", Server: "b", Port: 80, Side: "client", Owner: "x"}].Connects; got != 12 {
+		t.Fatalf("last minute connects = %d, want 12", got)
 	}
 	// old: served from rollups (fine windows only cover 2 minutes)
 	q = s.Query(base, end)
-	if got := q.Pairs[model.PairKey{Client: "a", Server: "b", Port: 80, Side: "client", Owner: "x"}].Connects; got < 115 {
-		t.Fatalf("10 minute connects = %d, want ~120 (rollups)", got)
+	// fine windows start mid-minute (7m55s): the boundary must not be
+	// counted twice (rollup + fine)
+	if got := q.Pairs[model.PairKey{Client: "a", Server: "b", Port: 80, Side: "client", Owner: "x"}].Connects; got != 120 {
+		t.Fatalf("10 minute connects = %d, want exactly 120", got)
 	}
-	if q.Entities["pod:1"].DNS.Queries < 230 {
-		t.Fatalf("dns queries = %d", q.Entities["pod:1"].DNS.Queries)
+	if q.Entities["pod:1"].DNS.Queries != 240 {
+		t.Fatalf("dns queries = %d, want 240", q.Entities["pod:1"].DNS.Queries)
 	}
 }
 
@@ -76,5 +80,99 @@ func TestDecodeProcAddr(t *testing.T) {
 	}
 	if a := decodeProcAddr("00000000000000000000000001000000"); a != "::1" {
 		t.Fatal(a)
+	}
+}
+
+func TestRedactArgs(t *testing.T) {
+	cases := map[string]string{
+		"app --password=hunter2 --port 80":         "app --password=*** --port 80",
+		"psql --password hunter2 -h db":            "psql --password *** -h db",
+		"env DB_PASSWORD=s3cret API_KEY=abc ./run": "env DB_PASSWORD=*** API_KEY=*** ./run",
+		"curl -H token: xyz http://a":              "curl -H token: *** http://a",
+		"nginx -g daemon off;":                     "nginx -g daemon off;",
+		"java -Xmx1g -jar app.jar":                 "java -Xmx1g -jar app.jar",
+	}
+	for in, want := range cases {
+		if got := RedactArgs(in); got != want {
+			t.Errorf("RedactArgs(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestTerminationIsNotACrash(t *testing.T) {
+	c := &procCollector{terminating: map[string]time.Time{}}
+	now := time.Now()
+	if !c.isTermination("pod:a", 15, 0, now) || !c.isTermination("pod:a", 0, 143, now) {
+		t.Fatal("SIGTERM / exit 143 must be a termination")
+	}
+	if c.isTermination("pod:a", 11, 0, now) || c.isTermination("pod:a", 0, 1, now) {
+		t.Fatal("SIGSEGV / exit 1 without a prior SIGTERM is a crash")
+	}
+	c.terminating["pod:a"] = now.Add(-30 * time.Second)
+	if !c.isTermination("pod:a", 9, 0, now) {
+		t.Fatal("SIGKILL after SIGTERM (grace period expired) is a termination")
+	}
+	c.terminating["pod:a"] = now.Add(-time.Hour)
+	if c.isTermination("pod:a", 9, 0, now) {
+		t.Fatal("old SIGTERM must not hide a later crash")
+	}
+}
+
+func TestListenRefcountAndPrune(t *testing.T) {
+	r := NewRecorder()
+	r.Listen(model.Listen{Entity: "pod:a", Port: 80})
+	r.Listen(model.Listen{Entity: "pod:a", Port: 80}) // v4 + v6 listener
+	r.Listen(model.Listen{Entity: "pod:b", Port: 90})
+	r.Unlisten("pod:a", 80)
+	if len(r.Listens()) != 2 {
+		t.Fatalf("one of two sockets closed: %+v", r.Listens())
+	}
+	r.Unlisten("pod:a", 80)
+	if len(r.Listens()) != 1 {
+		t.Fatalf("both sockets closed: %+v", r.Listens())
+	}
+	r.PruneListens(func(e string) bool { return e != "pod:b" })
+	if len(r.Listens()) != 0 {
+		t.Fatalf("pruned: %+v", r.Listens())
+	}
+}
+
+func TestLearnNameEvictsInBatches(t *testing.T) {
+	r := NewRecorder()
+	for i := 0; i < maxDNSNames+10; i++ {
+		r.LearnName(fmt.Sprintf("10.%d.%d.%d", i>>16&255, i>>8&255, i&255), "n")
+	}
+	if n := len(r.Names()); n > maxDNSNames || n < maxDNSNames*9/10 {
+		t.Fatalf("cache size %d out of bounds", n)
+	}
+}
+
+func TestTokenAuth(t *testing.T) {
+	a := &Agent{cfg: Config{Token: "s3cret"}, store: NewStore(time.Minute, time.Hour), rec: NewRecorder(), status: map[string]string{}}
+	a.metrics = newMetrics(a)
+	h := a.Handler()
+	do := func(path, token string) int {
+		req := httptest.NewRequest("GET", path, nil)
+		if token != "" {
+			req.Header.Set(TokenHeader, token)
+		}
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		return rr.Code
+	}
+	if c := do("/v1/snapshot", ""); c != 401 {
+		t.Fatalf("no token: %d", c)
+	}
+	if c := do("/v1/snapshot", "wrong"); c != 401 {
+		t.Fatalf("wrong token: %d", c)
+	}
+	if c := do("/v1/snapshot?lite=1", "s3cret"); c != 200 {
+		t.Fatalf("good token: %d", c)
+	}
+	if c := do("/healthz", ""); c != 200 {
+		t.Fatalf("healthz must stay open: %d", c)
+	}
+	if c := do("/metrics", ""); c != 200 {
+		t.Fatalf("metrics must stay open: %d", c)
 	}
 }

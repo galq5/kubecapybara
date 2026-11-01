@@ -4,7 +4,7 @@
  *
  * Aggregates per (client ip, server ip, server port, observing side, local cgroup):
  *   - smoothed RTT histogram (sampled at most every 100ms per socket)
- *   - connect / handshake latency histogram
+ *   - connect latency histogram (client side)
  *   - bytes, connections, lifetimes (churn)
  *   - refused connections, connect timeouts, SYN retransmits
  *   - retransmits (and "large segment" retransmits as an MTU hint), resets
@@ -43,6 +43,7 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #define EV_LISTEN 1
 #define EV_CONNECT_START 2
 #define EV_CONNECT_DONE 3
+#define EV_UNLISTEN 4
 
 struct pair_key {
 	__u8 saddr[16]; /* client */
@@ -271,7 +272,7 @@ static __always_inline void flush_bytes(struct sock *sk, struct sk_info *info, s
 	info->last_rcvd = rcvd;
 }
 
-static __always_inline void emit_listen(struct sock *sk)
+static __always_inline void emit_listen(struct sock *sk, __u8 type)
 {
 	struct net_event *ev;
 	__u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
@@ -282,9 +283,10 @@ static __always_inline void emit_listen(struct sock *sk)
 		return;
 	__builtin_memset(ev, 0, sizeof(*ev));
 	ev->ts = bpf_ktime_get_ns();
-	ev->type = EV_LISTEN;
+	ev->type = type;
 	ev->family = family;
-	ev->cgroup = bpf_get_current_cgroup_id();
+	/* the closing context may differ from the owner: use the socket's cgroup */
+	ev->cgroup = type == EV_LISTEN ? bpf_get_current_cgroup_id() : sock_cgroup_id(sk);
 	ev->pid = bpf_get_current_pid_tgid() >> 32;
 	ev->port = BPF_CORE_READ(sk, __sk_common.skc_num);
 	sk_local_remote(sk, family, ev->addr, raddr);
@@ -331,7 +333,11 @@ int BPF_PROG(on_state, struct sock *sk, int oldstate, int newstate)
 		return 0;
 
 	if (newstate == TCP_LISTEN) {
-		emit_listen(sk);
+		emit_listen(sk, EV_LISTEN);
+		return 0;
+	}
+	if (oldstate == TCP_LISTEN) {
+		emit_listen(sk, EV_UNLISTEN);
 		return 0;
 	}
 
@@ -353,7 +359,10 @@ int BPF_PROG(on_state, struct sock *sk, int oldstate, int newstate)
 	if (newstate == TCP_SYN_RECV) {
 		struct sk_info fresh = {};
 
-		fresh.start_ns = now;
+		/* No start_ns: the child socket is only created when the final ACK
+		 * arrives (the request lives in TCP_NEW_SYN_RECV before), so
+		 * SYN_RECV->ESTABLISHED is not the handshake time. Connect latency
+		 * is a client-side metric. */
 		fresh.role = ROLE_SERVER;
 		bpf_map_update_elem(&socks, &skp, &fresh, BPF_ANY);
 		return 0;

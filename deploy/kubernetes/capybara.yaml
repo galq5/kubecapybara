@@ -1,6 +1,12 @@
 # kubecapybara node agent.
 #
 #   kubectl apply -f deploy/kubernetes/capybara.yaml
+#   kubectl -n capybara create secret generic capybara-agent-token \
+#     --from-literal=token="$(head -c 32 /dev/urandom | base64 | tr -dc A-Za-z0-9)"
+#   kubectl -n capybara rollout restart ds/capybara-agent
+#
+# The token protects the agent API (process command lines, traffic data);
+# kubectl-capybara reads it from the Secret with the caller's RBAC.
 #
 # The agent needs privileges to load eBPF programs (CAP_BPF, CAP_PERFMON,
 # CAP_SYS_ADMIN for cgroup attachment and older kernels), the host PID
@@ -69,6 +75,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # API token (create it first, see the top of this file). Without
+            # it the agent API is unauthenticated.
+            - name: CAPYBARA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: capybara-agent-token
+                  key: token
+                  optional: true
           ports:
             - name: api
               containerPort: 9876
@@ -141,7 +155,11 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods/proxy"]
-    verbs: ["get", "create"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["capybara-agent-token"]
+    verbs: ["get"]
 # Bind both to your users/groups, e.g.:
 #
 # apiVersion: rbac.authorization.k8s.io/v1

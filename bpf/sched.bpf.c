@@ -36,6 +36,15 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 #define TASK_RUNNING 0
 #define TASK_INTERRUPTIBLE 1
 #define TASK_UNINTERRUPTIBLE 2
+#define TASK_DEAD 0x80
+
+/*
+ * Start of the current collection window, set by user space at every
+ * collection. Time a thread spent in a state before this point belongs to
+ * earlier windows: it is not credited to the current one, so a thread waking
+ * up after sleeping for an hour does not dump that hour into a 5s window.
+ */
+volatile __u64 window_start_ns = 0;
 
 struct cg_sched {
 	__u64 oncpu_ns;
@@ -164,6 +173,16 @@ static __always_inline long task_syscall_nr(struct task_struct *t)
 #endif
 }
 
+/* time spent in a state since ts, clipped to the current window */
+static __always_inline __u64 in_window(__u64 ts, __u64 now)
+{
+	__u64 ws = window_start_ns;
+
+	if (ts < ws)
+		ts = ws;
+	return now > ts ? now - ts : 0;
+}
+
 static __always_inline void on_wake(struct task_struct *p)
 {
 	__u32 tid = BPF_CORE_READ(p, pid);
@@ -182,7 +201,7 @@ static __always_inline void on_wake(struct task_struct *p)
 			if (cs) {
 				__u32 k = st->kind & (NKINDS - 1);
 
-				__sync_fetch_and_add(&cs->off_ns[k], now - st->ts);
+				__sync_fetch_and_add(&cs->off_ns[k], in_window(st->ts, now));
 				__sync_fetch_and_add(&cs->wakeups, 1);
 			}
 		}
@@ -202,10 +221,18 @@ int BPF_PROG(on_wakeup, struct task_struct *p)
 	return 0;
 }
 
+/* a brand new task: never account from a (possibly stale, reused TID) entry */
 SEC("tp_btf/sched_wakeup_new")
 int BPF_PROG(on_wakeup_new, struct task_struct *p)
 {
-	on_wake(p);
+	__u32 tid = BPF_CORE_READ(p, pid);
+	struct tstate fresh = {};
+
+	if (!tid)
+		return 0;
+	fresh.ts = bpf_ktime_get_ns();
+	fresh.kind = K_RUNQ;
+	bpf_map_update_elem(&tstates, &tid, &fresh, BPF_ANY);
 	return 0;
 }
 
@@ -229,10 +256,16 @@ int BPF_PROG(on_switch, bool preempt, struct task_struct *prev, struct task_stru
 		if (st && st->kind == K_ONCPU) {
 			cs = cg_get(prev_cg);
 			if (cs)
-				__sync_fetch_and_add(&cs->oncpu_ns, now - st->ts);
+				__sync_fetch_and_add(&cs->oncpu_ns, in_window(st->ts, now));
 		}
 
-		if (state == TASK_RUNNING)
+		if (state & TASK_DEAD) {
+			/* exiting: drop the entry so a reused TID starts clean */
+			bpf_map_delete_elem(&tstates, &prev_tid);
+			goto next;
+		}
+		/* preempted tasks stay runnable whatever __state says */
+		if (preempt || state == TASK_RUNNING)
 			kind = K_RUNQ;
 		else if (state & TASK_UNINTERRUPTIBLE)
 			kind = K_DISK;
@@ -249,6 +282,7 @@ int BPF_PROG(on_switch, bool preempt, struct task_struct *prev, struct task_stru
 		}
 	}
 
+next:
 	/* --- next gets the CPU --- */
 	if (next_tid) {
 		st = bpf_map_lookup_elem(&tstates, &next_tid);
@@ -258,7 +292,7 @@ int BPF_PROG(on_switch, bool preempt, struct task_struct *prev, struct task_stru
 
 			cs = cg_get(next_cg);
 			if (cs) {
-				__sync_fetch_and_add(&cs->off_ns[K_RUNQ], delta);
+				__sync_fetch_and_add(&cs->off_ns[K_RUNQ], in_window(st->ts, now));
 				hist_add(&cs->runq, delta / 1000);
 			}
 			if (prev_tid && prev_cg != next_cg && delta > 10000) {

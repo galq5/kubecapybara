@@ -126,20 +126,33 @@ func (s *Store) Query(from, to time.Time) *Window {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := NewWindow(time.Time{}, time.Time{})
-	fineStart := to
-	if len(s.fine) > 0 {
-		fineStart = s.fine[0].Start
-	}
 	overlaps := func(w *Window) bool { return w.End.After(from) && !w.Start.After(to) }
-	if from.Before(fineStart) {
-		for _, w := range s.coarse {
-			if overlaps(w) && w.Start.Before(fineStart) {
-				out.Merge(w)
-			}
+	coarse := s.coarse
+	if s.pending != nil {
+		coarse = append(coarse[:len(coarse):len(coarse)], s.pending)
+	}
+	// Every fine window is also merged into exactly one minute rollup (by
+	// its start). Use rollups for the minutes before the first minute fully
+	// covered by fine windows and fine windows from there on, so nothing is
+	// counted twice.
+	boundary := to.Add(time.Nanosecond)
+	if len(s.fine) > 0 {
+		fineStart := s.fine[0].Start
+		boundary = fineStart.Truncate(s.rollEvery)
+		if boundary.Before(fineStart) {
+			boundary = boundary.Add(s.rollEvery)
+		}
+		if !from.Before(fineStart) {
+			boundary = time.Time{} // fully inside the fine range
+		}
+	}
+	for _, w := range coarse {
+		if overlaps(w) && w.Start.Before(boundary) {
+			out.Merge(w)
 		}
 	}
 	for _, w := range s.fine {
-		if overlaps(w) {
+		if overlaps(w) && !w.Start.Before(boundary) {
 			out.Merge(w)
 		}
 	}

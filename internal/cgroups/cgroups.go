@@ -69,9 +69,14 @@ type Resolver struct {
 
 	mu       sync.RWMutex
 	byID     map[uint64]*Info
+	unknown  map[uint64]time.Time // ids a rescan did not find (deleted cgroups)
 	lastScan time.Time
 	minScan  time.Duration
 }
+
+// negativeTTL is how long an id that a rescan did not find is not rescanned
+// for again (cgroups of exited containers keep showing up in events).
+const negativeTTL = 30 * time.Second
 
 // DetectRoot finds the cgroup v2 mount point under prefix (e.g. "" or "/host").
 func DetectRoot(prefix string) (string, error) {
@@ -101,7 +106,7 @@ func DetectRoot(prefix string) (string, error) {
 
 // NewResolver creates a resolver rooted at the cgroup2 mount point.
 func NewResolver(root string) *Resolver {
-	r := &Resolver{root: root, byID: map[uint64]*Info{}, minScan: 2 * time.Second}
+	r := &Resolver{root: root, byID: map[uint64]*Info{}, unknown: map[uint64]time.Time{}, minScan: 2 * time.Second}
 	r.Scan()
 	return r
 }
@@ -148,6 +153,11 @@ func (r *Resolver) Scan() {
 	r.mu.Lock()
 	r.byID = byID
 	r.lastScan = time.Now()
+	for id := range r.unknown {
+		if _, ok := byID[id]; ok {
+			delete(r.unknown, id)
+		}
+	}
 	r.mu.Unlock()
 }
 
@@ -157,15 +167,22 @@ func (r *Resolver) Lookup(id uint64) *Info {
 	r.mu.RLock()
 	info, ok := r.byID[id]
 	last := r.lastScan
+	missAt, missed := r.unknown[id]
 	r.mu.RUnlock()
 	if ok {
 		return info
 	}
-	if id != 0 && time.Since(last) > r.minScan {
+	if id != 0 && time.Since(last) > r.minScan && (!missed || time.Since(missAt) > negativeTTL) {
 		r.Scan()
-		r.mu.RLock()
+		r.mu.Lock()
 		info, ok = r.byID[id]
-		r.mu.RUnlock()
+		if !ok {
+			if len(r.unknown) > 10000 {
+				r.unknown = map[uint64]time.Time{}
+			}
+			r.unknown[id] = time.Now()
+		}
+		r.mu.Unlock()
 		if ok {
 			return info
 		}

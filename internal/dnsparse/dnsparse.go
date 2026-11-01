@@ -133,10 +133,9 @@ func IsSearchExpansion(name, clusterDomain string) bool {
 	}
 }
 
-var tlds = map[string]bool{
-	"com": true, "net": true, "org": true, "io": true, "dev": true, "cloud": true, "internal": true,
-	"local": true, "co": true, "ai": true, "app": true, "edu": true, "gov": true, "info": true,
-	"biz": true, "us": true, "uk": true, "de": true, "pl": true, "eu": true, "me": true, "sh": true,
-}
+// Only TLDs that are implausible as namespace names: lookups of missing
+// services in namespaces such as "app", "dev" or "internal" ("api.app.svc...")
+// must not be reported as search-path waste.
+var tlds = map[string]bool{"com": true, "net": true, "org": true, "edu": true, "gov": true}
 
 func looksLikeTLD(s string) bool { return tlds[s] }

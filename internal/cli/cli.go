@@ -44,8 +44,14 @@ type options struct {
 	noK8s         bool
 	filter        string
 
+	agentToken       string
+	agentTokenSecret string
+
 	src client.Source
 	cs  kubernetes.Interface
+
+	baseCache *analysis.View
+	baseAt    time.Time
 }
 
 // NewRoot builds the root command.
@@ -84,6 +90,8 @@ Run without arguments for the interactive dashboard.`,
 	pf.StringVar(&o.agentSelector, "agent-selector", "app.kubernetes.io/name=capybara-agent", "label selector of agent pods")
 	pf.IntVar(&o.agentPort, "agent-port", 9876, "agent API port")
 	pf.StringSliceVar(&o.agents, "agent", nil, "talk to agents directly (http://host:9876), repeatable; bypasses the API server proxy")
+	pf.StringVar(&o.agentToken, "agent-token", os.Getenv("CAPYBARA_AGENT_TOKEN"), "agent API token for --agent (default $CAPYBARA_AGENT_TOKEN)")
+	pf.StringVar(&o.agentTokenSecret, "agent-token-secret", "capybara-agent-token", "Secret in the agent namespace holding the agent API token (key \"token\")")
 	pf.StringVar(&o.fromFile, "from-file", "", "read data from a snapshot bundle instead of live agents")
 	pf.DurationVarP(&o.window, "window", "w", time.Minute, "time window to analyse")
 	pf.DurationVar(&o.baseline, "baseline", time.Hour, "baseline window before --window used to detect regressions (0 disables)")
@@ -153,7 +161,7 @@ func (o *options) init() error {
 		}
 		o.src = fs
 	case len(o.agents) > 0:
-		ds := &client.DirectSource{URLs: o.agents}
+		ds := &client.DirectSource{URLs: o.agents, Token: o.agentToken}
 		if !o.noK8s {
 			if cs, err := o.kubeClient(); err == nil {
 				var (
@@ -185,7 +193,7 @@ func (o *options) init() error {
 		if err != nil {
 			return fmt.Errorf("loading kubeconfig: %w (use --agent URL or --from-file to run without a cluster)", err)
 		}
-		o.src = client.NewKubeSource(cs, o.agentNS, o.agentSelector, o.agentPort, o.clusterDomain)
+		o.src = client.NewKubeSource(cs, o.agentNS, o.agentSelector, o.agentPort, o.clusterDomain, o.agentTokenSecret)
 	}
 	return nil
 }
@@ -206,7 +214,7 @@ func (o *options) timeRange() (time.Time, time.Time) {
 // load fetches the current view and, when withBase, the baseline view.
 func (o *options) load(ctx context.Context, withBase bool) (*tui.Result, error) {
 	from, to := o.timeRange()
-	snaps, errs := o.src.Snapshots(ctx, from, to)
+	snaps, errs := o.src.Snapshots(ctx, from, to, false)
 	res := &tui.Result{}
 	for _, e := range errs {
 		res.Warnings = append(res.Warnings, e.Error())
@@ -223,13 +231,38 @@ func (o *options) load(ctx context.Context, withBase bool) (*tui.Result, error) 
 	}
 	res.View = analysis.Build(snaps, meta, o.aopts())
 	if withBase && o.baseline > 0 {
-		if bs, _ := o.src.Snapshots(ctx, from.Add(-o.baseline), from); len(bs) > 0 && hasData(bs) {
-			res.Base = analysis.Build(bs, meta, o.aopts())
-			res.Base.From, res.Base.To = from.Add(-o.baseline), from
-		}
+		res.Base = o.baselineView(ctx, from, meta)
 	}
 	res.Findings = analysis.Doctor(res.View, res.Base)
 	return res, nil
+}
+
+// baselineCacheTTL bounds how often the (large, slowly changing) baseline is
+// re-fetched by the dashboard.
+const baselineCacheTTL = time.Minute
+
+// baselineView returns the view of the baseline window ending at from. It
+// uses lite snapshots, is cached for a minute and its time range is the
+// range actually covered by agent data (clamped to the requested one), so
+// rates are not diluted when agents have less history than requested.
+func (o *options) baselineView(ctx context.Context, from time.Time, meta *k8smeta.Meta) *analysis.View {
+	if o.baseCache != nil && time.Since(o.baseAt) < baselineCacheTTL {
+		return o.baseCache
+	}
+	bf := from.Add(-o.baseline)
+	bs, _ := o.src.Snapshots(ctx, bf, from, true)
+	if len(bs) == 0 || !hasData(bs) {
+		return nil
+	}
+	b := analysis.Build(bs, meta, o.aopts())
+	if b.From.Before(bf) {
+		b.From = bf
+	}
+	if b.To.IsZero() || b.To.After(from) {
+		b.To = from
+	}
+	o.baseCache, o.baseAt = b, time.Now()
+	return b
 }
 
 func hasData(snaps []*model.Snapshot) bool {

@@ -32,6 +32,15 @@ agent:
   extraArgs: []
   extraEnv: []
 
+# -- Agent API authentication. The agent API exposes process command lines
+# (secrets are masked) and traffic data, so keep this enabled: a random token
+# is generated into a Secret that kubectl-capybara reads with the caller's RBAC.
+auth:
+  enabled: true
+  secretName: capybara-agent-token
+  # -- Fixed token (default: generated once and kept across upgrades).
+  token: ""
+
 # -- Use the host network namespace (node-level conntrack stats, stable port per node).
 hostNetwork: true
 

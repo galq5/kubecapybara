@@ -88,7 +88,7 @@ var ansi16 = []string{
 const fgDefault, bgDefault = "#ebdbb2", "#1d2021"
 
 type sgr struct {
-	fg, bg              string
+	fg, bg                string
 	bold, under, rev, dim bool
 }
 

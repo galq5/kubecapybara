@@ -31,10 +31,15 @@ type Recorder struct {
 	full      bool
 	crashes   []model.CrashReport
 	startups  map[string]*model.Startup
-	listens   map[string]model.Listen
+	listens   map[string]*listenEntry
 	series    map[string][]model.ResourceSample
 	dnsNames  map[string]dnsName
 	lastCrash map[string]time.Time
+}
+
+type listenEntry struct {
+	model.Listen
+	refs int
 }
 
 type dnsName struct {
@@ -47,7 +52,7 @@ func NewRecorder() *Recorder {
 	return &Recorder{
 		events:    make([]model.Event, maxEvents),
 		startups:  map[string]*model.Startup{},
-		listens:   map[string]model.Listen{},
+		listens:   map[string]*listenEntry{},
 		series:    map[string][]model.ResourceSample{},
 		dnsNames:  map[string]dnsName{},
 		lastCrash: map[string]time.Time{},
@@ -151,11 +156,41 @@ func (r *Recorder) Startups(from, to time.Time) []model.Startup {
 	return out
 }
 
-// Listen records a listening socket.
+// Listen records a listening socket. Sockets are reference counted per
+// entity and port (SO_REUSEPORT, IPv4+IPv6 listeners).
 func (r *Recorder) Listen(l model.Listen) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.listens[fmt.Sprintf("%s|%d", l.Entity, l.Port)] = l
+	k := fmt.Sprintf("%s|%d", l.Entity, l.Port)
+	if e, ok := r.listens[k]; ok {
+		e.refs++
+		return
+	}
+	r.listens[k] = &listenEntry{Listen: l, refs: 1}
+}
+
+// Unlisten records that a listening socket was closed.
+func (r *Recorder) Unlisten(entity string, port uint16) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	k := fmt.Sprintf("%s|%d", entity, port)
+	if e, ok := r.listens[k]; ok {
+		e.refs--
+		if e.refs <= 0 {
+			delete(r.listens, k)
+		}
+	}
+}
+
+// PruneListens drops listeners of entities that no longer exist.
+func (r *Recorder) PruneListens(alive func(entity string) bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, e := range r.listens {
+		if !alive(e.Entity) {
+			delete(r.listens, k)
+		}
+	}
 }
 
 // Listens returns all known listening sockets.
@@ -164,7 +199,7 @@ func (r *Recorder) Listens() []model.Listen {
 	defer r.mu.Unlock()
 	out := make([]model.Listen, 0, len(r.listens))
 	for _, l := range r.listens {
-		out = append(out, l)
+		out = append(out, l.Listen)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Entity != out[j].Entity {
@@ -241,17 +276,35 @@ func (r *Recorder) LearnName(ip, name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := time.Now()
-	if len(r.dnsNames) >= maxDNSNames {
-		for k, v := range r.dnsNames {
-			if now.Sub(v.seen) > dnsNameLifetime || len(r.dnsNames) >= maxDNSNames {
-				delete(r.dnsNames, k)
-			}
-			if len(r.dnsNames) < maxDNSNames*9/10 {
-				break
-			}
-		}
+	if _, ok := r.dnsNames[ip]; !ok && len(r.dnsNames) >= maxDNSNames {
+		r.evictNamesLocked(now)
 	}
 	r.dnsNames[ip] = dnsName{name: name, seen: now}
+}
+
+// evictNamesLocked drops expired names and then the oldest ones until the
+// cache is at 90% capacity, so eviction work is amortised over many inserts.
+func (r *Recorder) evictNamesLocked(now time.Time) {
+	type kv struct {
+		ip   string
+		seen time.Time
+	}
+	all := make([]kv, 0, len(r.dnsNames))
+	for ip, n := range r.dnsNames {
+		if now.Sub(n.seen) > dnsNameLifetime {
+			delete(r.dnsNames, ip)
+			continue
+		}
+		all = append(all, kv{ip, n.seen})
+	}
+	target := maxDNSNames * 9 / 10
+	if len(r.dnsNames) <= target {
+		return
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].seen.Before(all[j].seen) })
+	for _, e := range all[:len(r.dnsNames)-target] {
+		delete(r.dnsNames, e.ip)
+	}
 }
 
 // Names returns the ip->name cache.

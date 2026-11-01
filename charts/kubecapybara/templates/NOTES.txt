@@ -18,6 +18,15 @@ The agent is privileged. If Pod Security Admission is enforced, label the namesp
 No CLI users were bound. Grant access with --set rbac.viewers.groups={your-group}
 (roles: {{ include "capybara.fullname" . }}-viewer, {{ include "capybara.fullname" . }}-agent-proxy).
 {{- end }}
+{{- if and .Values.auth.enabled (ne .Values.auth.secretName "capybara-agent-token") }}
+
+The agent token lives in secret {{ .Values.auth.secretName }}: pass --agent-token-secret {{ .Values.auth.secretName }}.
+{{- end }}
+{{- if not .Values.auth.enabled }}
+
+WARNING: agent API authentication is disabled; anyone who can reach port {{ .Values.agent.port }}
+on a node can read process command lines and traffic data.
+{{- end }}
 {{- if .Values.agent.l7 }}
 
 HTTP tracing (--l7) is enabled: it hooks every read/write syscall on the nodes.

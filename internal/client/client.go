@@ -14,11 +14,14 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/galq5/kubecapybara/internal/k8smeta"
@@ -27,8 +30,10 @@ import (
 
 // Source provides snapshots, profiles and metadata.
 type Source interface {
-	// Snapshots returns one snapshot per agent for [from, to].
-	Snapshots(ctx context.Context, from, to time.Time) ([]*model.Snapshot, []error)
+	// Snapshots returns one snapshot per agent for [from, to]. Lite
+	// snapshots omit events, the DNS name cache, listeners, crash reports
+	// and startup traces (enough for baselines).
+	Snapshots(ctx context.Context, from, to time.Time, lite bool) ([]*model.Snapshot, []error)
 	// Profile runs a CPU profile of an entity on a node.
 	Profile(ctx context.Context, node, entity string, seconds, hz int) (*model.Profile, error)
 	// Meta returns cluster metadata (nil when unavailable).
@@ -56,15 +61,21 @@ type KubeSource struct {
 	Selector      string // agent pod label selector
 	Port          int
 	ClusterDomain string
+	// TokenSecret is the Secret (in Namespace, key "token") holding the
+	// agent API token. Reading it requires RBAC get on that Secret.
+	TokenSecret string
 
 	metaMu  sync.Mutex
 	meta    *k8smeta.Meta
 	metaTTL time.Duration
+
+	tokenOnce sync.Once
+	token     string
 }
 
 // NewKubeSource creates a source for agents deployed in namespace ns.
-func NewKubeSource(cs kubernetes.Interface, ns, selector string, port int, clusterDomain string) *KubeSource {
-	return &KubeSource{CS: cs, Namespace: ns, Selector: selector, Port: port, ClusterDomain: clusterDomain, metaTTL: 30 * time.Second}
+func NewKubeSource(cs kubernetes.Interface, ns, selector string, port int, clusterDomain, tokenSecret string) *KubeSource {
+	return &KubeSource{CS: cs, Namespace: ns, Selector: selector, Port: port, ClusterDomain: clusterDomain, TokenSecret: tokenSecret, metaTTL: 30 * time.Second}
 }
 
 func (k *KubeSource) Describe() string { return "cluster agents in namespace " + k.Namespace }
@@ -86,18 +97,55 @@ func (k *KubeSource) agents(ctx context.Context) ([]corev1.Pod, error) {
 	return out, nil
 }
 
-func (k *KubeSource) get(ctx context.Context, pod, path string, params map[string]string) ([]byte, error) {
-	return k.CS.CoreV1().Pods(k.Namespace).ProxyGet("http", pod, strconv.Itoa(k.Port), path, params).DoRaw(ctx)
+// agentToken reads the agent API token from its Secret (once). A missing or
+// forbidden Secret yields no token: agents without authentication still work
+// and agents requiring one answer 401 with a clear message.
+func (k *KubeSource) agentToken(ctx context.Context) string {
+	k.tokenOnce.Do(func() {
+		if k.TokenSecret == "" {
+			return
+		}
+		s, err := k.CS.CoreV1().Secrets(k.Namespace).Get(ctx, k.TokenSecret, metav1.GetOptions{})
+		if err == nil {
+			k.token = strings.TrimSpace(string(s.Data["token"]))
+		}
+	})
+	return k.token
 }
 
-func rangeParams(from, to time.Time) map[string]string {
-	return map[string]string{
+func (k *KubeSource) get(ctx context.Context, pod, path string, params map[string]string) ([]byte, error) {
+	req := k.CS.CoreV1().RESTClient().Get().
+		Namespace(k.Namespace).Resource("pods").SubResource("proxy").
+		Name(utilnet.JoinSchemeNamePort("http", pod, strconv.Itoa(k.Port))).
+		Suffix(path)
+	for key, v := range params {
+		req = req.Param(key, v)
+	}
+	if t := k.agentToken(ctx); t != "" {
+		req = req.SetHeader(TokenHeader, t)
+	}
+	b, err := req.DoRaw(ctx)
+	if apierrors.IsUnauthorized(err) || strings.Contains(string(b), "invalid "+TokenHeader) {
+		return nil, fmt.Errorf("agent rejected the request: need read access to secret %s/%s holding the agent token: %w", k.Namespace, k.TokenSecret, err)
+	}
+	return b, err
+}
+
+// TokenHeader carries the agent API token (see agent.requireToken).
+const TokenHeader = "X-Capybara-Token"
+
+func rangeParams(from, to time.Time, lite bool) map[string]string {
+	p := map[string]string{
 		"from": strconv.FormatInt(from.Unix(), 10),
 		"to":   strconv.FormatInt(to.Unix(), 10),
 	}
+	if lite {
+		p["lite"] = "1"
+	}
+	return p
 }
 
-func (k *KubeSource) Snapshots(ctx context.Context, from, to time.Time) ([]*model.Snapshot, []error) {
+func (k *KubeSource) Snapshots(ctx context.Context, from, to time.Time, lite bool) ([]*model.Snapshot, []error) {
 	agents, err := k.agents(ctx)
 	if err != nil {
 		return nil, []error{err}
@@ -115,7 +163,7 @@ func (k *KubeSource) Snapshots(ctx context.Context, from, to time.Time) ([]*mode
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			raw, err := k.get(ctx, p.Name, "/v1/snapshot", rangeParams(from, to))
+			raw, err := k.get(ctx, p.Name, "/v1/snapshot", rangeParams(from, to, lite))
 			var snap model.Snapshot
 			if err == nil {
 				err = json.Unmarshal(raw, &snap)
@@ -184,6 +232,7 @@ func (k *KubeSource) Meta(ctx context.Context) (*k8smeta.Meta, error) {
 // DirectSource talks to agents at explicit URLs (e.g. http://node:9876).
 type DirectSource struct {
 	URLs   []string
+	Token  string // agent API token, if the agents require one
 	Client *http.Client
 	// MetaSource optionally provides metadata (e.g. a kube client).
 	MetaFn func(ctx context.Context) (*k8smeta.Meta, error)
@@ -209,6 +258,9 @@ func (d *DirectSource) fetch(ctx context.Context, base, path string, q url.Value
 	if err != nil {
 		return nil, err
 	}
+	if d.Token != "" {
+		req.Header.Set(TokenHeader, d.Token)
+	}
 	resp, err := d.httpc().Do(req)
 	if err != nil {
 		return nil, err
@@ -224,7 +276,7 @@ func (d *DirectSource) fetch(ctx context.Context, base, path string, q url.Value
 	return b, nil
 }
 
-func (d *DirectSource) Snapshots(ctx context.Context, from, to time.Time) ([]*model.Snapshot, []error) {
+func (d *DirectSource) Snapshots(ctx context.Context, from, to time.Time, lite bool) ([]*model.Snapshot, []error) {
 	var (
 		mu   sync.Mutex
 		wg   sync.WaitGroup
@@ -232,7 +284,7 @@ func (d *DirectSource) Snapshots(ctx context.Context, from, to time.Time) ([]*mo
 		errs []error
 	)
 	q := url.Values{}
-	for k, v := range rangeParams(from, to) {
+	for k, v := range rangeParams(from, to, lite) {
 		q.Set(k, v)
 	}
 	for _, base := range d.URLs {
@@ -326,7 +378,7 @@ func (f *FileSource) Describe() string {
 // Bundle returns the loaded bundle.
 func (f *FileSource) Bundle() *Bundle { return f.bundle }
 
-func (f *FileSource) Snapshots(ctx context.Context, from, to time.Time) ([]*model.Snapshot, []error) {
+func (f *FileSource) Snapshots(ctx context.Context, from, to time.Time, lite bool) ([]*model.Snapshot, []error) {
 	// a bundle holds a single window: return the baseline for older ranges
 	if len(f.bundle.Baseline) > 0 && !to.After(f.bundle.From) {
 		return f.bundle.Baseline, nil

@@ -4,7 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
 
@@ -49,12 +51,42 @@ type procCollector struct {
 	objs bpf.ProcObjects
 	l    linker
 	rd   *ringbuf.Reader
+
+	// entity -> time a SIGTERM was delivered to the container's PID 1
+	// (pod deletion, rollout, eviction, liveness restart): the exit that
+	// follows is a requested termination, not a crash.
+	terminating map[string]time.Time
+}
+
+// terminationGrace is how long after a SIGTERM to PID 1 an exit (or the
+// final SIGKILL) is considered part of a requested termination.
+const terminationGrace = 15 * time.Minute
+
+var secretArg = regexp.MustCompile(`(?i)((?:password|passwd|pwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|credentials?|auth)[a-z0-9_-]*\s*[=:]\s*|--?(?:password|passwd|secret|token|api[-_]?key|access[-_]?key|private[-_]?key|credentials?)[a-z0-9_-]*\s+)("[^"]*"|'[^']*'|\S+)`)
+
+// RedactArgs masks values of secret-looking arguments (--password=x,
+// TOKEN=y, --api-key z) so command lines can be shown safely.
+func RedactArgs(args string) string {
+	return secretArg.ReplaceAllString(args, "${1}***")
+}
+
+// isTermination reports whether an exit/kill of PID 1 is a requested
+// termination rather than a crash.
+func (c *procCollector) isTermination(entity string, sig, status int32, t time.Time) bool {
+	if sig == 15 || status == 143 {
+		return true
+	}
+	if at, ok := c.terminating[entity]; ok && t.Sub(at) < terminationGrace {
+		return true
+	}
+	return false
 }
 
 func (c *procCollector) Name() string { return "proc" }
 
 func (c *procCollector) Start(a *Agent) error {
 	c.a = a
+	c.terminating = map[string]time.Time{}
 	if err := bpf.LoadProcObjects(&c.objs, nil); err != nil {
 		return fmt.Errorf("load: %w", err)
 	}
@@ -108,7 +140,7 @@ func (c *procCollector) handle(ev *bpf.ProcCapyProcEvent) {
 		}
 		pcomm := cstr(ev.Pcomm[:])
 		file := cstr(ev.Filename[:])
-		args := argsString(ev.Args[:])
+		args := RedactArgs(argsString(ev.Args[:]))
 		fields := map[string]string{
 			"file": file, "args": args, "ppid": fmt.Sprint(ev.Ppid), "parent": pcomm,
 			"nsPid": fmt.Sprint(ev.NsPid), "uid": fmt.Sprint(ev.Uid),
@@ -149,15 +181,22 @@ func (c *procCollector) handle(ev *bpf.ProcCapyProcEvent) {
 			}
 		}
 		sev := model.SevInfo
+		crashed := false
 		if ev.NsPid == 1 {
-			sev = model.SevCrit
 			msg = "container main process: " + msg
+			if c.isTermination(info.Entity, sig, status, t) {
+				msg += " (termination requested)"
+			} else {
+				sev = model.SevCrit
+				crashed = true
+			}
+			delete(c.terminating, info.Entity)
 		}
 		a.rec.Add(model.Event{
 			Time: t, Entity: info.Entity, Type: model.EvExit, Severity: sev, PID: ev.Pid, Comm: comm, Message: msg,
 			Fields: map[string]string{"status": fmt.Sprint(status), "signal": fmt.Sprint(sig), "nsPid": fmt.Sprint(ev.NsPid)},
 		})
-		if ev.NsPid == 1 && (sig != 0 || status != 0) {
+		if crashed {
 			a.rec.Crash(info.Entity, msg, t)
 		}
 
@@ -184,8 +223,19 @@ func (c *procCollector) handle(ev *bpf.ProcCapyProcEvent) {
 			Time: t, Entity: target.Entity, Type: model.EvSignal, Severity: sev, PID: ev.TargetPid, Comm: tcomm, Message: msg,
 			Fields: map[string]string{"signal": sname, "sender": comm, "senderPid": fmt.Sprint(ev.Pid), "senderEntity": sender.Entity, "nsPid": fmt.Sprint(ev.TargetNsPid)},
 		})
-		if ev.TargetNsPid == 1 && ev.Code != 15 {
-			a.rec.Crash(target.Entity, msg, t)
+		if ev.TargetNsPid == 1 {
+			if ev.Code == 15 {
+				c.terminating[target.Entity] = t
+				if len(c.terminating) > 4096 {
+					for k, at := range c.terminating {
+						if t.Sub(at) > terminationGrace {
+							delete(c.terminating, k)
+						}
+					}
+				}
+			} else if !(ev.Code == 9 && c.isTermination(target.Entity, 0, 0, t)) {
+				a.rec.Crash(target.Entity, msg, t)
+			}
 		}
 
 	case procEvOOM:

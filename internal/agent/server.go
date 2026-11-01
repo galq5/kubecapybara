@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -18,10 +19,11 @@ import (
 //	GET  /metrics
 func (a *Agent) Handler() http.Handler {
 	mux := http.NewServeMux()
+	api := a.requireToken
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	mux.HandleFunc("/v1/status", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v1/status", api(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, map[string]any{
 			"node":       a.cfg.Node,
 			"version":    a.cfg.Version,
@@ -29,16 +31,16 @@ func (a *Agent) Handler() http.Handler {
 			"oldest":     a.store.Oldest(),
 			"interval":   a.cfg.Interval.String(),
 		})
-	})
-	mux.HandleFunc("/v1/snapshot", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("/v1/snapshot", api(func(w http.ResponseWriter, r *http.Request) {
 		from, to, err := parseRange(r)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, a.Snapshot(from, to))
-	})
-	mux.HandleFunc("/v1/profile", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, a.Snapshot(from, to, r.URL.Query().Get("lite") == "1"))
+	}))
+	mux.HandleFunc("/v1/profile", api(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		entity := q.Get("entity")
 		if entity == "" {
@@ -63,12 +65,33 @@ func (a *Agent) Handler() http.Handler {
 			return
 		}
 		writeJSON(w, prof)
-	})
+	}))
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		a.metrics.write(w)
 	})
 	return mux
+}
+
+// TokenHeader carries the shared agent API token.
+const TokenHeader = "X-Capybara-Token"
+
+// requireToken rejects requests without the configured token. The header
+// survives the Kubernetes API server pod proxy (which strips the caller's
+// own Authorization header), so access is gated by who may read the token
+// Secret and use pods/proxy.
+func (a *Agent) requireToken(h http.HandlerFunc) http.HandlerFunc {
+	if a.cfg.Token == "" {
+		return h
+	}
+	want := []byte(a.cfg.Token)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if subtle.ConstantTimeCompare([]byte(r.Header.Get(TokenHeader)), want) != 1 {
+			http.Error(w, "missing or invalid "+TokenHeader, http.StatusUnauthorized)
+			return
+		}
+		h(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

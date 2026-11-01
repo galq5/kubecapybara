@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ const (
 	netEvListen       = 1
 	netEvConnectStart = 2
 	netEvConnectDone  = 3
+	netEvUnlisten     = 4
 )
 
 // netCollector: TCP pairs, connect errors, listens and startup connects.
@@ -111,6 +113,8 @@ func (c *netCollector) handleEvent(ev *bpf.NetNetEvent) {
 			Message: fmt.Sprintf("listening on %s:%d", addr, ev.Port),
 			Fields:  map[string]string{"port": fmt.Sprint(ev.Port)},
 		})
+	case netEvUnlisten:
+		a.rec.Unlisten(info.Entity, ev.Port)
 	case netEvConnectStart:
 		a.rec.Add(model.Event{
 			Time: t, Entity: info.Entity, Type: model.EvConnect, PID: ev.Pid, Comm: comm,
@@ -180,6 +184,17 @@ func (c *netCollector) Collect(w *Window) {
 			e.ConnErrors = map[string]uint64{}
 		}
 		e.ConnErrors[errnoName(k.Err)] += *v
+	})
+
+	// forget listeners of pods whose cgroups are gone
+	pods := a.resolver.Pods()
+	a.rec.PruneListens(func(entity string) bool {
+		uid, ok := strings.CutPrefix(entity, "pod:")
+		if !ok {
+			return true
+		}
+		_, alive := pods[uid]
+		return alive
 	})
 
 	// expire young cgroups

@@ -177,7 +177,14 @@ func (o *options) cmdRollout() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ns, name := splitNS(o.namespace, args[0])
-			name = strings.TrimPrefix(strings.TrimPrefix(name, "deployment/"), "deploy/")
+			workload, err := parseWorkload(name)
+			if err != nil {
+				return err
+			}
+			kind, name, _ := strings.Cut(workload, "/")
+			if kind != "Deployment" {
+				return fmt.Errorf("rollout comparison supports Deployments, got %s", kind)
+			}
 			for {
 				res, err := o.load(cmd.Context(), false)
 				if err != nil {
@@ -212,20 +219,53 @@ func (o *options) cmdRollout() *cobra.Command {
 	return c
 }
 
+// workloadKinds maps kubectl-style kind prefixes to Kubernetes kinds.
+var workloadKinds = map[string]string{
+	"deployment": "Deployment", "deployments": "Deployment", "deploy": "Deployment",
+	"statefulset": "StatefulSet", "statefulsets": "StatefulSet", "sts": "StatefulSet",
+	"daemonset": "DaemonSet", "daemonsets": "DaemonSet", "ds": "DaemonSet",
+	"job": "Job", "jobs": "Job", "cronjob": "CronJob", "cronjobs": "CronJob", "cj": "CronJob",
+	"replicaset": "ReplicaSet", "rs": "ReplicaSet",
+}
+
+// splitNS parses "name", "kind/name", "ns/name" and "ns/kind/name". It
+// returns the namespace (defNS when absent) and the rest ("kind/name" or
+// "name").
 func splitNS(defNS, s string) (string, string) {
 	parts := strings.Split(s, "/")
-	if len(parts) == 2 && parts[0] != "deployment" && parts[0] != "deploy" {
+	switch len(parts) {
+	case 2:
+		if _, isKind := workloadKinds[strings.ToLower(parts[0])]; isKind {
+			return defNS, s
+		}
 		return parts[0], parts[1]
-	}
-	if len(parts) == 3 {
-		return parts[0], parts[2]
+	case 3:
+		return parts[0], parts[1] + "/" + parts[2]
 	}
 	return defNS, s
 }
 
+// parseWorkload turns "kind/name" or "name" into "Kind/name" (default
+// Deployment).
+func parseWorkload(s string) (string, error) {
+	kind, name, ok := strings.Cut(s, "/")
+	if !ok {
+		return "Deployment/" + s, nil
+	}
+	k, known := workloadKinds[strings.ToLower(kind)]
+	if !known {
+		return "", fmt.Errorf("unknown workload kind %q", kind)
+	}
+	return k + "/" + name, nil
+}
+
 func guessNamespace(v *analysis.View, deploy string) string {
+	return guessWorkloadNamespace(v, "Deployment/"+deploy)
+}
+
+func guessWorkloadNamespace(v *analysis.View, workload string) string {
 	for _, p := range v.Meta.Pods {
-		if p.Workload == "Deployment/"+deploy {
+		if p.Workload == workload {
 			return p.Namespace
 		}
 	}
@@ -334,23 +374,12 @@ func (o *options) cmdNetpol() *cobra.Command {
 				return err
 			}
 			ns, w := splitNS(o.namespace, args[0])
-			parts := strings.SplitN(w, "/", 2)
-			workload := w
-			if len(parts) == 2 {
-				kind := strings.ToLower(parts[0])
-				kinds := map[string]string{"deployment": "Deployment", "deploy": "Deployment", "statefulset": "StatefulSet", "sts": "StatefulSet", "daemonset": "DaemonSet", "ds": "DaemonSet"}
-				if k, ok := kinds[kind]; ok {
-					workload = k + "/" + parts[1]
-				}
-			} else {
-				workload = "Deployment/" + w
-			}
-			if strings.Contains(args[0], "/") && len(strings.Split(args[0], "/")) == 2 && ns != o.namespace {
-				// "ns/name" form
-				workload = "Deployment/" + w
+			workload, err := parseWorkload(w)
+			if err != nil {
+				return err
 			}
 			if ns == "" {
-				ns = guessNamespace(res.View, strings.TrimPrefix(workload, "Deployment/"))
+				ns = guessWorkloadNamespace(res.View, workload)
 			}
 			y, err := analysis.SuggestNetworkPolicy(res.View, ns, workload)
 			if err != nil {
@@ -422,7 +451,7 @@ func (o *options) cmdSnapshot() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			from, to := o.timeRange()
-			snaps, errs := o.src.Snapshots(ctx, from, to)
+			snaps, errs := o.src.Snapshots(ctx, from, to, false)
 			for _, e := range errs {
 				fmt.Fprintln(os.Stderr, "warning:", e)
 			}
@@ -431,7 +460,7 @@ func (o *options) cmdSnapshot() *cobra.Command {
 			}
 			b := client.Bundle{Created: time.Now(), From: from, To: to, Snapshots: snaps}
 			if o.baseline > 0 {
-				b.Baseline, _ = o.src.Snapshots(ctx, from.Add(-o.baseline), from)
+				b.Baseline, _ = o.src.Snapshots(ctx, from.Add(-o.baseline), from, true)
 			}
 			b.Meta, _ = o.src.Meta(ctx)
 			if out == "" {

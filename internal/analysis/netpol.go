@@ -61,7 +61,8 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 	var pods []*k8smeta.Pod
 	ids := map[string]bool{}
 	for _, p := range v.Meta.Pods {
-		if p.Namespace == ns && (p.Workload == workload || strings.EqualFold(strings.SplitN(p.Workload, "/", 2)[1], workload)) {
+		_, wname, _ := strings.Cut(p.Workload, "/")
+		if p.Namespace == ns && (p.Workload == workload || strings.EqualFold(wname, workload)) {
 			pods = append(pods, p)
 			ids["pod:"+p.UID] = true
 		}

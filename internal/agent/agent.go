@@ -32,7 +32,10 @@ type Config struct {
 	Disable       map[string]bool
 	ClusterDomain string
 	Version       string
-	Log           *slog.Logger
+	// Token, when set, must be sent in the X-Capybara-Token header to use
+	// the /v1 API (healthz and metrics stay open).
+	Token string
+	Log   *slog.Logger
 }
 
 // Collector is one data source.
@@ -177,6 +180,9 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 	defer a.Close()
 
+	if a.cfg.Token == "" {
+		a.log.Warn("API authentication disabled: anyone who can reach the agent port can read process command lines and traffic data; set CAPYBARA_TOKEN")
+	}
 	srv := &http.Server{Addr: a.cfg.Listen, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	errCh := make(chan error, 1)
 	go func() {
@@ -229,18 +235,22 @@ func (a *Agent) Close() {
 	}
 }
 
-// Snapshot returns aggregated data for [from, to].
-func (a *Agent) Snapshot(from, to time.Time) *model.Snapshot {
+// Snapshot returns aggregated data for [from, to]. A lite snapshot carries
+// only the aggregated metrics (no events, DNS name cache, listeners, crash
+// reports or startup traces), which is all a baseline comparison needs.
+func (a *Agent) Snapshot(from, to time.Time, lite bool) *model.Snapshot {
 	w := a.store.Query(from, to)
 	snap := w.ToSnapshot()
 	snap.Node = a.cfg.Node
 	snap.Version = a.cfg.Version
 	snap.Collectors = a.Status()
-	snap.DNSNames = a.rec.Names()
-	snap.Events = a.rec.Events(from, to, "", 5000)
-	snap.Listens = a.rec.Listens()
-	snap.Crashes = a.rec.Crashes(from, to)
-	snap.Startups = a.rec.Startups(from, to)
+	if !lite {
+		snap.DNSNames = a.rec.Names()
+		snap.Events = a.rec.Events(from, to, "", 5000)
+		snap.Listens = a.rec.Listens()
+		snap.Crashes = a.rec.Crashes(from, to)
+		snap.Startups = a.rec.Startups(from, to)
+	}
 	if snap.From.IsZero() {
 		snap.From = from
 	}

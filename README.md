@@ -30,7 +30,7 @@ HTML frames; any headless browser turns them into PNGs).
 
 | Question | Command | How it is measured |
 |---|---|---|
-| Is the network between A and B slow? | `edges` | Kernel smoothed TCP RTT, handshake latency, retransmits, resets, refused/timed-out connects, per pod pair (`tcp_probe`, `inet_sock_set_state`, `tcp_retransmit_skb` tracepoints) |
+| Is the network between A and B slow? | `edges` | Kernel smoothed TCP RTT, connect latency (client side), retransmits, resets, refused/timed-out connects, per pod pair (`tcp_probe`, `inet_sock_set_state`, `tcp_retransmit_skb` tracepoints) |
 | Why is my pod slow? | `pod <pod>` | Per-pod thread time breakdown: on-CPU, **waiting for CPU**, disk (D-state), network/read-write, poll, locks (futex), sleep (`sched_switch`/`sched_wakeup` + syscall classification) |
 | Who is my noisy neighbour? | `nodes` | Run queue delay attributed to the cgroup that occupied the CPU, disk and network usage per workload |
 | DNS problems? | `dns` | Every DNS packet of every pod (cgroup skb hook): latency, NXDOMAIN/SERVFAIL, timeouts, **ndots:5 search-path waste**, per CoreDNS replica processing latency |
@@ -107,7 +107,17 @@ Or with plain manifests:
 
 ```bash
 kubectl apply -f deploy/kubernetes/capybara.yaml
+kubectl -n capybara create secret generic capybara-agent-token \
+  --from-literal=token="$(head -c 32 /dev/urandom | base64 | tr -dc A-Za-z0-9)"
+kubectl -n capybara rollout restart ds/capybara-agent
 ```
+
+**API authentication.** The agent API exposes process command lines (secret-
+looking arguments such as `--password=` or `API_KEY=` are masked) and traffic
+data, so `/v1/*` requires the token from the `capybara-agent-token` Secret in
+the `X-Capybara-Token` header (`/healthz` and `/metrics` stay open). The chart
+generates it; the CLI reads it with your own RBAC, so being allowed to `get`
+that Secret is what grants access. With `--agent URL`, pass `--agent-token`.
 
 The CLI (kubectl plugin): download `kubectl-capybara` from the GitHub release
 (linux/darwin, amd64/arm64), put it on your `PATH`, or `make install-cli`.

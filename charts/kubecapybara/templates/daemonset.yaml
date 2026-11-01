@@ -87,6 +87,13 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- if .Values.auth.enabled }}
+            - name: CAPYBARA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.secretName }}
+                  key: token
+            {{- end }}
             {{- with .Values.agent.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

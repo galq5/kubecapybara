@@ -102,6 +102,9 @@ func scanExistingListeners(a *Agent) {
 		return
 	}
 	seenNS := map[string]bool{}
+	// hostNetwork pods share the host namespace: its sockets belong to host
+	// processes (sshd, kubelet...), not to the pod
+	hostNS, _ := os.Readlink(filepath.Join(a.cfg.ProcRoot, "1", "ns", "net"))
 	for _, e := range entries {
 		pid, err := strconv.ParseUint(e.Name(), 10, 32)
 		if err != nil {
@@ -116,7 +119,7 @@ func scanExistingListeners(a *Agent) {
 			continue
 		}
 		nsLink, err := os.Readlink(filepath.Join(a.cfg.ProcRoot, e.Name(), "ns", "net"))
-		if err != nil || seenNS[nsLink+info.Entity] {
+		if err != nil || seenNS[nsLink+info.Entity] || nsLink == hostNS {
 			continue
 		}
 		seenNS[nsLink+info.Entity] = true

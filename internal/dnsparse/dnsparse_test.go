@@ -77,6 +77,8 @@ func TestIsSearchExpansion(t *testing.T) {
 		"10-0-0-1.default.pod.cluster.local":         false,
 		"api.stripe.com":                             false,
 		"google.com.svc.cluster.local":               true,
+		"api.app.svc.cluster.local":                  false, // namespace "app", missing service
+		"web.dev.svc.cluster.local":                  false,
 	}
 	for name, want := range cases {
 		if got := IsSearchExpansion(name, "cluster.local"); got != want {

@@ -42,6 +42,10 @@ func (c *schedCollector) Start(a *Agent) error {
 
 func (c *schedCollector) Collect(w *Window) {
 	a := c.a
+	// time spent in a state before this point is not credited to the next window
+	if c.objs.WindowStartNs != nil {
+		_ = c.objs.WindowStartNs.Set(monoNow())
+	}
 	drainMap(c.objs.CgStats, func(cg uint64, v *bpf.SchedCgSched) {
 		e := w.Entity(a.resolver.Entity(cg))
 		s := &model.SchedStats{

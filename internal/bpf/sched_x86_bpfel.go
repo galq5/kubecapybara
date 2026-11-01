@@ -105,6 +105,7 @@ type SchedMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type SchedVariableSpecs struct {
+	WindowStartNs *ebpf.VariableSpec `ebpf:"window_start_ns"`
 }
 
 // SchedObjects contains all objects after they have been loaded into the kernel.
@@ -148,6 +149,7 @@ func (m *SchedMaps) Close() error {
 //
 // It can be passed to LoadSchedObjects or ebpf.CollectionSpec.LoadAndAssign.
 type SchedVariables struct {
+	WindowStartNs *ebpf.Variable `ebpf:"window_start_ns"`
 }
 
 // SchedPrograms contains all programs after they have been loaded into the kernel.
