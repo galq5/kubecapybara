@@ -564,17 +564,23 @@ func (d *Drop) Key() DropKey { return DropKey{d.Src, d.Dst, d.Port, d.Proto, d.R
 
 // NodeStats are node-level health metrics.
 type NodeStats struct {
-	CPUs                  int       `json:"cpus,omitempty"`
-	Load1                 float64   `json:"load1,omitempty"`
-	ConntrackCount        uint64    `json:"conntrackCount,omitempty"`
-	ConntrackMax          uint64    `json:"conntrackMax,omitempty"`
-	ConntrackInsertFailed uint64    `json:"conntrackInsertFailed,omitempty"` // delta
-	ConntrackDrop         uint64    `json:"conntrackDrop,omitempty"`         // delta
-	ConntrackEarlyDrop    uint64    `json:"conntrackEarlyDrop,omitempty"`    // delta
-	PSICPU                float64   `json:"psiCpu,omitempty"`
-	PSIMem                float64   `json:"psiMem,omitempty"`
-	PSIIO                 float64   `json:"psiIo,omitempty"`
-	SampledAt             time.Time `json:"sampledAt,omitempty"`
+	CPUs                  int     `json:"cpus,omitempty"`
+	Load1                 float64 `json:"load1,omitempty"`
+	ConntrackCount        uint64  `json:"conntrackCount,omitempty"`
+	ConntrackMax          uint64  `json:"conntrackMax,omitempty"`
+	ConntrackInsertFailed uint64  `json:"conntrackInsertFailed,omitempty"` // delta
+	ConntrackDrop         uint64  `json:"conntrackDrop,omitempty"`         // delta
+	ConntrackEarlyDrop    uint64  `json:"conntrackEarlyDrop,omitempty"`    // delta
+	PSICPU                float64 `json:"psiCpu,omitempty"`
+	PSIMem                float64 `json:"psiMem,omitempty"`
+	PSIIO                 float64 `json:"psiIo,omitempty"`
+	// network stack (deltas unless noted)
+	NICs            map[string]*NICStats `json:"nics,omitempty"`
+	SoftnetDropped  uint64               `json:"softnetDropped,omitempty"`  // input backlog full
+	SoftnetSqueezed uint64               `json:"softnetSqueezed,omitempty"` // NAPI budget/time ran out
+	NetRxTopShare   float64              `json:"netRxTopShare,omitempty"`   // gauge: share of NET_RX softirqs on the busiest CPU
+	NetRxCPU        int                  `json:"netRxCpu,omitempty"`        // gauge: that CPU
+	SampledAt       time.Time            `json:"sampledAt,omitempty"`
 }
 
 // Merge adds o into n (gauges take the latest sample).
@@ -592,6 +598,44 @@ func (n *NodeStats) Merge(o NodeStats) {
 	n.ConntrackInsertFailed += o.ConntrackInsertFailed
 	n.ConntrackDrop += o.ConntrackDrop
 	n.ConntrackEarlyDrop += o.ConntrackEarlyDrop
+	n.SoftnetDropped += o.SoftnetDropped
+	n.SoftnetSqueezed += o.SoftnetSqueezed
+	if o.NetRxTopShare > 0 {
+		n.NetRxTopShare, n.NetRxCPU = o.NetRxTopShare, o.NetRxCPU
+	}
+	for name, s := range o.NICs {
+		if n.NICs == nil {
+			n.NICs = map[string]*NICStats{}
+		}
+		cur, ok := n.NICs[name]
+		if !ok {
+			cur = &NICStats{}
+			n.NICs[name] = cur
+		}
+		cur.Add(s)
+	}
+}
+
+// NICStats are interface counters (deltas).
+type NICStats struct {
+	RxBytes   uint64 `json:"rxBytes,omitempty"`
+	TxBytes   uint64 `json:"txBytes,omitempty"`
+	RxErrors  uint64 `json:"rxErrors,omitempty"`
+	TxErrors  uint64 `json:"txErrors,omitempty"`
+	RxDropped uint64 `json:"rxDropped,omitempty"`
+	TxDropped uint64 `json:"txDropped,omitempty"`
+	RxMissed  uint64 `json:"rxMissed,omitempty"` // ring buffer overflow
+}
+
+// Add adds o into s.
+func (s *NICStats) Add(o *NICStats) {
+	s.RxBytes += o.RxBytes
+	s.TxBytes += o.TxBytes
+	s.RxErrors += o.RxErrors
+	s.TxErrors += o.TxErrors
+	s.RxDropped += o.RxDropped
+	s.TxDropped += o.TxDropped
+	s.RxMissed += o.RxMissed
 }
 
 // Event types.
@@ -707,3 +751,34 @@ func SortedKeys(m map[string]uint64) []string {
 	})
 	return keys
 }
+
+// Counters are hardware performance counters of an entity and of the
+// whole node over the same interval (scaled for multiplexing).
+type Counters struct {
+	Entity           string        `json:"entity"`
+	Node             string        `json:"node"`
+	Duration         time.Duration `json:"duration"`
+	Cycles           uint64        `json:"cycles"`
+	Instructions     uint64        `json:"instructions"`
+	CacheRefs        uint64        `json:"cacheRefs"`
+	CacheMisses      uint64        `json:"cacheMisses"`
+	NodeCycles       uint64        `json:"nodeCycles"`
+	NodeInstructions uint64        `json:"nodeInstructions"`
+	NodeCacheRefs    uint64        `json:"nodeCacheRefs"`
+	NodeCacheMisses  uint64        `json:"nodeCacheMisses"`
+}
+
+func div(a, b uint64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return float64(a) / float64(b)
+}
+
+// IPC is instructions per cycle of the entity (and of the node).
+func (c *Counters) IPC() float64     { return div(c.Instructions, c.Cycles) }
+func (c *Counters) NodeIPC() float64 { return div(c.NodeInstructions, c.NodeCycles) }
+
+// MissRate is the share of cache references that missed.
+func (c *Counters) MissRate() float64     { return div(c.CacheMisses, c.CacheRefs) }
+func (c *Counters) NodeMissRate() float64 { return div(c.NodeCacheMisses, c.NodeCacheRefs) }

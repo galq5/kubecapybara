@@ -36,6 +36,8 @@ type Source interface {
 	Snapshots(ctx context.Context, from, to time.Time, lite bool) ([]*model.Snapshot, []error)
 	// Profile runs a CPU profile of an entity on a node.
 	Profile(ctx context.Context, node, entity string, seconds, hz int) (*model.Profile, error)
+	// Counters measures hardware performance counters of an entity.
+	Counters(ctx context.Context, node, entity string, seconds int) (*model.Counters, error)
 	// Meta returns cluster metadata (nil when unavailable).
 	Meta(ctx context.Context) (*k8smeta.Meta, error)
 	// PodEvents returns Kubernetes events of a pod (nil when unavailable).
@@ -223,6 +225,24 @@ func (k *KubeSource) PodEvents(ctx context.Context, ns, uid string) ([]k8smeta.P
 	return k8smeta.LoadPodEvents(ctx, k.CS, ns, uid)
 }
 
+func (k *KubeSource) Counters(ctx context.Context, node, entity string, seconds int) (*model.Counters, error) {
+	agents, err := k.agents(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range agents {
+		if p.Spec.NodeName == node {
+			raw, err := k.get(ctx, p.Name, "/v1/counters", map[string]string{"entity": entity, "seconds": strconv.Itoa(seconds)})
+			if err != nil {
+				return nil, err
+			}
+			var c model.Counters
+			return &c, json.Unmarshal(raw, &c)
+		}
+	}
+	return nil, fmt.Errorf("no agent running on node %s", node)
+}
+
 func (k *KubeSource) Meta(ctx context.Context) (*k8smeta.Meta, error) {
 	k.metaMu.Lock()
 	defer k.metaMu.Unlock()
@@ -371,6 +391,35 @@ func (d *DirectSource) PodEvents(ctx context.Context, ns, uid string) ([]k8smeta
 	return nil, nil
 }
 
+func (d *DirectSource) Counters(ctx context.Context, node, entity string, seconds int) (*model.Counters, error) {
+	q := url.Values{"entity": {entity}, "seconds": {strconv.Itoa(seconds)}}
+	var lastErr error
+	for _, base := range d.URLs {
+		raw, err := d.fetch(ctx, base, "/v1/status", nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		var st struct {
+			Node string `json:"node"`
+		}
+		_ = json.Unmarshal(raw, &st)
+		if node != "" && st.Node != node && len(d.URLs) > 1 {
+			continue
+		}
+		raw, err = d.fetch(ctx, base, "/v1/counters", q)
+		if err != nil {
+			return nil, err
+		}
+		var c model.Counters
+		return &c, json.Unmarshal(raw, &c)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no agent for node %s", node)
+	}
+	return nil, lastErr
+}
+
 func (d *DirectSource) Meta(ctx context.Context) (*k8smeta.Meta, error) {
 	if d.MetaFn != nil {
 		return d.MetaFn(ctx)
@@ -422,6 +471,10 @@ func (f *FileSource) Profile(context.Context, string, string, int, int) (*model.
 }
 
 func (f *FileSource) Meta(context.Context) (*k8smeta.Meta, error) { return f.bundle.Meta, nil }
+
+func (f *FileSource) Counters(context.Context, string, string, int) (*model.Counters, error) {
+	return nil, errors.New("hardware counters are not available when reading from a snapshot file")
+}
 
 func (f *FileSource) Changes(context.Context, time.Time) ([]k8smeta.Change, error) { return nil, nil }
 

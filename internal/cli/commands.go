@@ -823,3 +823,53 @@ func (o *options) cmdProfileDiff() *cobra.Command {
 	c.Flags().IntVar(&n, "top", 25, "number of functions to show")
 	return c
 }
+
+func (o *options) cmdControlPlane() *cobra.Command {
+	return &cobra.Command{
+		Use:     "controlplane",
+		Aliases: []string{"cp", "etcd"},
+		Short:   "Health of etcd, API server, scheduler, controller manager and cluster DNS pods",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.ControlPlane(r.View) }, func(st render.Style, r *tui.Result) error {
+				render.Header(os.Stdout, st, r.View, o.src.Describe())
+				render.ControlPlane(os.Stdout, st, r.View)
+				return nil
+			})
+		},
+	}
+}
+
+func (o *options) cmdCounters() *cobra.Command {
+	var dur time.Duration
+	c := &cobra.Command{
+		Use:     "counters <pod>",
+		Aliases: []string{"ipc"},
+		Short:   "Hardware counters of a pod vs its node: instructions per cycle, cache misses (noisy neighbours on shared caches)",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			res, err := o.load(cmd.Context(), false)
+			if err != nil {
+				return err
+			}
+			id, pod, err := o.resolvePod(res.View, args[0])
+			if err != nil {
+				return err
+			}
+			node := ""
+			if pod != nil {
+				node = pod.Node
+			}
+			c, err := o.src.Counters(cmd.Context(), node, id, int(dur.Seconds()))
+			if err != nil {
+				return err
+			}
+			if o.output == "json" {
+				return o.jsonOut(os.Stdout, c)
+			}
+			render.Counters(os.Stdout, o.style(), c)
+			return nil
+		},
+	}
+	c.Flags().DurationVarP(&dur, "duration", "d", 5*time.Second, "measurement duration (max 60s)")
+	return c
+}

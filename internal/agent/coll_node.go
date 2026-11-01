@@ -85,6 +85,7 @@ func (c *nodeCollector) Collect(w *Window) {
 			c.prev[k] = st[k]
 		}
 	}
+	c.netStack(&ns)
 	ns.PSICPU = readPSI(c.proc("pressure/cpu"))
 	ns.PSIMem = readPSI(c.proc("pressure/memory"))
 	ns.PSIIO = readPSI(c.proc("pressure/io"))
@@ -92,6 +93,88 @@ func (c *nodeCollector) Collect(w *Window) {
 }
 
 func (c *nodeCollector) Close() error { return nil }
+
+// virtual interfaces of containers and overlays: their drops are reported
+// by the drop collector per flow; NIC counters are for real devices
+var virtualIf = []string{"lo", "veth", "cali", "cilium", "lxc", "flannel", "vxlan", "docker", "br-", "cni", "kube-", "tunl", "genev", "ifb", "dummy", "nodelocaldns", "virbr", "tap", "weave", "antrea", "ovs"}
+
+func isVirtualIf(name string) bool {
+	for _, p := range virtualIf {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *nodeCollector) delta(key string, cur uint64) uint64 {
+	prev, ok := c.prev[key]
+	c.prev[key] = cur
+	if !ok {
+		return 0
+	}
+	return sub(cur, prev)
+}
+
+// netStack reads NIC counters (sysfs of the host network namespace, the
+// agent runs with hostNetwork), softnet drops/squeezes and the NET_RX
+// softirq distribution over CPUs.
+func (c *nodeCollector) netStack(ns *model.NodeStats) {
+	entries, _ := os.ReadDir("/sys/class/net")
+	for _, e := range entries {
+		name := e.Name()
+		if isVirtualIf(name) {
+			continue
+		}
+		dir := filepath.Join("/sys/class/net", name, "statistics")
+		r := func(f string) uint64 {
+			v, _ := readUint(filepath.Join(dir, f))
+			return c.delta("nic|"+name+"|"+f, v)
+		}
+		s := &model.NICStats{RxBytes: r("rx_bytes"), TxBytes: r("tx_bytes"), RxErrors: r("rx_errors"), TxErrors: r("tx_errors"),
+			RxDropped: r("rx_dropped"), TxDropped: r("tx_dropped"), RxMissed: r("rx_missed_errors")}
+		if ns.NICs == nil {
+			ns.NICs = map[string]*model.NICStats{}
+		}
+		ns.NICs[name] = s
+	}
+	if b, err := os.ReadFile(c.proc("net/softnet_stat")); err == nil {
+		var dropped, squeezed uint64
+		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 3 {
+				d, _ := strconv.ParseUint(f[1], 16, 64)
+				q, _ := strconv.ParseUint(f[2], 16, 64)
+				dropped += d
+				squeezed += q
+			}
+		}
+		ns.SoftnetDropped = c.delta("softnet|dropped", dropped)
+		ns.SoftnetSqueezed = c.delta("softnet|squeezed", squeezed)
+	}
+	if b, err := os.ReadFile(c.proc("softirqs")); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) < 2 || f[0] != "NET_RX:" {
+				continue
+			}
+			var total, top uint64
+			topCPU := 0
+			for i, v := range f[1:] {
+				n, _ := strconv.ParseUint(v, 10, 64)
+				d := c.delta("netrx|"+strconv.Itoa(i), n)
+				total += d
+				if d > top {
+					top, topCPU = d, i
+				}
+			}
+			if total > 1000 && len(f)-1 >= 4 {
+				ns.NetRxTopShare = float64(top) / float64(total)
+				ns.NetRxCPU = topCPU
+			}
+		}
+	}
+}
 
 // scanExistingListeners discovers sockets that were already listening when
 // the agent started by reading /proc/<pid>/net/tcp{,6} once per network

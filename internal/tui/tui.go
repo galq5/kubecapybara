@@ -589,6 +589,9 @@ func (m *model) renderText(b *bytes.Buffer) {
 		render.Section(b, st, "Database calls (plaintext Postgres / MySQL / Redis)")
 		render.DB(b, st, v, f)
 	case "Nodes":
+		render.Section(b, st, "Control plane")
+		render.ControlPlane(b, st, v)
+		fmt.Fprintln(b)
 		render.Nodes(b, st, v, f)
 		render.Section(b, st, "Memory trending to OOM")
 		render.OOMRisks(b, st, v)

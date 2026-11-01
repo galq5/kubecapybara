@@ -540,3 +540,42 @@ func ProfileDiff(w io.Writer, st Style, before, now *model.Profile, beforeName, 
 	t.Render(w, st)
 	fmt.Fprintln(w, st.Dim("shares of CPU samples; pp = percentage points. Java/Node frames need a perf map (/tmp/perf-<pid>.map) to show method names"))
 }
+
+// ControlPlane prints control plane component health.
+func ControlPlane(w io.Writer, st Style, v *analysis.View) {
+	cs := analysis.ControlPlane(v)
+	if len(cs) == 0 {
+		fmt.Fprintln(w, st.Dim("no control plane pods observed (managed control planes run outside the cluster; CoreDNS is shown when present)"))
+		return
+	}
+	t := &Table{Headers: []string{"ROLE", "POD", "NODE", "RESTARTS", "WAIT CPU", "THROTTLED", "MEM", "DISK p99", "SLOW FSYNC", "STATUS"},
+		Right: map[int]bool{3: true, 4: true, 5: true, 6: true, 7: true, 8: true}, MaxCol: 60}
+	for _, c := range cs {
+		status := st.OK("ok")
+		if len(c.Problems) > 0 {
+			status = st.Warn(strings.Join(c.Problems, "; "))
+		}
+		fsync := "-"
+		if c.FsyncSlow > 0 {
+			fsync = fmt.Sprintf("%d (max %s)", c.FsyncSlow, analysis.Dur(c.FsyncP99))
+		}
+		t.AddRow(c.Role, c.Endpoint.Display(), c.Endpoint.Node, fmt.Sprint(c.Restarts), analysis.Pct(c.CPUWait), analysis.Pct(c.Throttled),
+			analysis.Pct(c.MemPct), analysis.Dur(c.DiskP99), fsync, status)
+	}
+	t.Render(w, st)
+	fmt.Fprintln(w, st.Dim("etcd fsync latency needs the agent's --files flag (disk p99 is used otherwise)"))
+}
+
+// Counters prints hardware counters of a pod vs its node.
+func Counters(w io.Writer, st Style, c *model.Counters) {
+	fmt.Fprintf(w, "%s %s on %s over %s\n\n", st.Title("hardware counters"), c.Entity, c.Node, c.Duration)
+	t := &Table{Headers: []string{"", "POD", "WHOLE NODE"}, Right: map[int]bool{1: true, 2: true}}
+	t.AddRow("instructions per cycle", fmt.Sprintf("%.2f", c.IPC()), fmt.Sprintf("%.2f", c.NodeIPC()))
+	t.AddRow("cache miss rate", analysis.Pct(c.MissRate()), analysis.Pct(c.NodeMissRate()))
+	t.AddRow("cycles", fmt.Sprint(c.Cycles), fmt.Sprint(c.NodeCycles))
+	t.AddRow("instructions", fmt.Sprint(c.Instructions), fmt.Sprint(c.NodeInstructions))
+	t.Render(w, st)
+	if c.NodeIPC() > 0 && c.IPC() < 0.5*c.NodeIPC() {
+		fmt.Fprintln(w, st.Warn("\n! the pod executes far fewer instructions per cycle than the node average: memory stalls or a noisy neighbour on shared caches"))
+	}
+}

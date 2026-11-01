@@ -553,6 +553,14 @@ func Nodes(w io.Writer, st Style, v *analysis.View, f Filter) {
 			st.Title("node/"+n.Name), orDash(n.Zone), n.Stats.Load1, n.Stats.CPUs, r.CPUCores, n.Stats.PSICPU, n.Stats.PSIMem, n.Stats.PSIIO)
 		fmt.Fprintf(w, "  conntrack %s  insert_failed %d  drops %d  retransmits %s/s  disk %s/s\n",
 			ct, n.Stats.ConntrackInsertFailed, r.Drops, analysis.Rate(v.PerSec(r.Retrans)), analysis.Bytes(v.PerSec(r.DiskBytes)))
+		for name, nic := range n.Stats.NICs {
+			fmt.Fprintf(w, "  nic %s rx %s/s tx %s/s  errors %d/%d  dropped %d/%d  missed %d\n", name,
+				analysis.Bytes(v.PerSec(nic.RxBytes)), analysis.Bytes(v.PerSec(nic.TxBytes)), nic.RxErrors, nic.TxErrors, nic.RxDropped, nic.TxDropped, nic.RxMissed)
+		}
+		if n.Stats.SoftnetDropped+n.Stats.SoftnetSqueezed > 0 || n.Stats.NetRxTopShare > 0 {
+			fmt.Fprintf(w, "  softnet dropped %d  squeezed %d  NET_RX on busiest CPU %s (cpu %d)\n",
+				n.Stats.SoftnetDropped, n.Stats.SoftnetSqueezed, analysis.Pct(n.Stats.NetRxTopShare), n.Stats.NetRxCPU)
+		}
 		t := &Table{Headers: []string{"  WORKLOAD", "CPU", "RUNQ p99", "WAITING FOR CPU", "DELAY CAUSED TO OTHERS", "DISK/s", "DISK p99", "NET/s"},
 			Right: map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true}, MaxCol: 50}
 		shown := 0

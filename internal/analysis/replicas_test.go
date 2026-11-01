@@ -178,3 +178,30 @@ func TestProfileDiff(t *testing.T) {
 		}
 	}
 }
+
+func TestControlPlaneAndNodeNetwork(t *testing.T) {
+	now := time.Now()
+	meta := &k8smeta.Meta{Pods: map[string]*k8smeta.Pod{
+		"etcd": {UID: "etcd", Namespace: "kube-system", Name: "etcd-cp1", Node: "cp1", Labels: map[string]string{"component": "etcd"}, Phase: "Running", Workload: "Node/cp1"},
+	}, Nodes: map[string]*k8smeta.Node{}}
+	meta.Index()
+	snap := &model.Snapshot{Node: "cp1", From: now.Add(-time.Minute), To: now,
+		Entities: map[string]*model.EntityStats{"pod:etcd": {ID: "pod:etcd",
+			Files: map[string]*model.FileStats{"/var/lib/etcd/member/wal/0.wal": {Path: "/var/lib/etcd/member/wal/0.wal", Fsyncs: 12, MaxNs: 150e6, WaitNs: 900e6}}}},
+		NodeStats: model.NodeStats{CPUs: 8, SoftnetDropped: 40, NICs: map[string]*model.NICStats{"eth0": {RxMissed: 7}}, NetRxTopShare: 0.9, NetRxCPU: 0}}
+	v := Build([]*model.Snapshot{snap}, meta, Options{})
+	cp := ControlPlane(v)
+	if len(cp) != 1 || cp[0].Role != "etcd" || len(cp[0].Problems) == 0 {
+		t.Fatalf("control plane: %+v", cp)
+	}
+	rules := map[string]Severity{}
+	for _, f := range Doctor(v, nil) {
+		rules[f.Rule] = f.Severity
+	}
+	if rules["control-plane"] != SevCrit {
+		t.Fatalf("etcd fsync of 150ms must be critical: %v", rules)
+	}
+	if _, ok := rules["node-network"]; !ok {
+		t.Fatalf("node network finding missing: %v", rules)
+	}
+}

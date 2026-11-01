@@ -111,6 +111,7 @@ Run without arguments for the interactive dashboard.`,
 		o.cmdNetpol(), o.cmdProfile(), o.cmdSnapshot(), o.cmdVersion(version),
 		o.cmdRightsize(), o.cmdServices(), o.cmdOOM(), o.cmdDB(), o.cmdFiles(),
 		o.cmdOutliers(), o.cmdSLO(), o.cmdPools(), o.cmdIncident(), o.cmdProfileDiff(),
+		o.cmdControlPlane(), o.cmdCounters(),
 	)
 	return root
 }

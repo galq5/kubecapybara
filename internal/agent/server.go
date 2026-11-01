@@ -66,6 +66,19 @@ func (a *Agent) Handler() http.Handler {
 		}
 		writeJSON(w, prof)
 	}))
+	mux.HandleFunc("/v1/counters", api(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		secs, _ := strconv.Atoi(q.Get("seconds"))
+		if secs <= 0 || secs > 60 {
+			secs = 5
+		}
+		c, err := a.Counters(r.Context(), q.Get("entity"), time.Duration(secs)*time.Second)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, c)
+	}))
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		a.metrics.write(w)
