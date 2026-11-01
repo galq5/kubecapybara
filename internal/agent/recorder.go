@@ -25,15 +25,15 @@ const (
 // Recorder is the flight recorder: a bounded history of notable events,
 // per-entity resource samples, crash reports and startup timelines.
 type Recorder struct {
-	mu       sync.Mutex
-	events   []model.Event
-	head     int
-	full     bool
-	crashes  []model.CrashReport
-	startups map[string]*model.Startup
-	listens  map[string]model.Listen
-	series   map[string][]model.ResourceSample
-	dnsNames map[string]dnsName
+	mu        sync.Mutex
+	events    []model.Event
+	head      int
+	full      bool
+	crashes   []model.CrashReport
+	startups  map[string]*model.Startup
+	listens   map[string]model.Listen
+	series    map[string][]model.ResourceSample
+	dnsNames  map[string]dnsName
 	lastCrash map[string]time.Time
 }
 

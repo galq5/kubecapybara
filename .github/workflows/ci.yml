@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: vet and unit tests
+        run: make test
+      - name: build
+        run: make build
+
+  bpf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: install clang and libbpf headers
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev
+      - name: compile eBPF programs
+        run: make generate
+      - name: load programs into the runner kernel (verifier)
+        run: make test-bpf

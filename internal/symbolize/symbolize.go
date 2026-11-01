@@ -23,9 +23,9 @@ type Symbolizer struct {
 	kOnce sync.Once
 	ksyms []sym
 
-	mu    sync.Mutex
-	elfs  map[string]*elfInfo
-	maps  map[uint32][]mapping
+	mu   sync.Mutex
+	elfs map[string]*elfInfo
+	maps map[uint32][]mapping
 }
 
 type sym struct {

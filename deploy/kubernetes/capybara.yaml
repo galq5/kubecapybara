@@ -1,0 +1,157 @@
+# kubecapybara node agent.
+#
+#   kubectl apply -f deploy/kubernetes/capybara.yaml
+#
+# The agent needs privileges to load eBPF programs (CAP_BPF, CAP_PERFMON,
+# CAP_SYS_ADMIN for cgroup attachment and older kernels), the host PID
+# namespace (process names, /proc/<pid>/root for symbolization) and the host
+# network namespace (node-level conntrack statistics).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: capybara
+  labels:
+    app.kubernetes.io/name: kubecapybara
+    pod-security.kubernetes.io/enforce: privileged
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: capybara-agent
+  namespace: capybara
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: capybara-agent
+  namespace: capybara
+  labels:
+    app.kubernetes.io/name: capybara-agent
+    app.kubernetes.io/part-of: kubecapybara
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: capybara-agent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 25%
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: capybara-agent
+        app.kubernetes.io/part-of: kubecapybara
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9876"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: capybara-agent
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: agent
+          image: ghcr.io/galq5/kubecapybara-agent:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --listen=:9876
+            - --host-prefix=/host
+            - --proc=/proc
+            # HTTP/1.x tracing hooks every read/write syscall; enable if the overhead is acceptable
+            # - --l7
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          ports:
+            - name: api
+              containerPort: 9876
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9876
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9876
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: cgroup
+              mountPath: /host/sys/fs/cgroup
+              readOnly: true
+            - name: tracefs
+              mountPath: /sys/kernel/tracing
+            - name: debugfs
+              mountPath: /sys/kernel/debug
+            - name: bpffs
+              mountPath: /sys/fs/bpf
+      volumes:
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+        - name: tracefs
+          hostPath:
+            path: /sys/kernel/tracing
+        - name: debugfs
+          hostPath:
+            path: /sys/kernel/debug
+        - name: bpffs
+          hostPath:
+            path: /sys/fs/bpf
+---
+# Permissions needed by people running `kubectl capybara`:
+# read cluster metadata and reach the agents through the API server proxy.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: capybara-viewer
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: capybara-agent-proxy
+  namespace: capybara
+rules:
+  - apiGroups: [""]
+    resources: ["pods/proxy"]
+    verbs: ["get", "create"]
+# Bind both to your users/groups, e.g.:
+#
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: ClusterRoleBinding
+# metadata: {name: capybara-viewer-sre}
+# roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: capybara-viewer}
+# subjects: [{kind: Group, name: sre, apiGroup: rbac.authorization.k8s.io}]
+# ---
+# apiVersion: rbac.authorization.k8s.io/v1
+# kind: RoleBinding
+# metadata: {name: capybara-agent-proxy-sre, namespace: capybara}
+# roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: capybara-agent-proxy}
+# subjects: [{kind: Group, name: sre, apiGroup: rbac.authorization.k8s.io}]

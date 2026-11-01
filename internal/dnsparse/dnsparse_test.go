@@ -68,15 +68,15 @@ func TestParse(t *testing.T) {
 
 func TestIsSearchExpansion(t *testing.T) {
 	cases := map[string]bool{
-		"api.stripe.com.default.svc.cluster.local": true,
+		"api.stripe.com.default.svc.cluster.local":   true,
 		"payments.default.default.svc.cluster.local": true,
-		"api.stripe.com.svc.cluster.local":          true,
-		"api.stripe.com.cluster.local":              true,
-		"payments.default.svc.cluster.local":        false,
-		"payments.svc.cluster.local":                false,
-		"10-0-0-1.default.pod.cluster.local":        false,
-		"api.stripe.com":                            false,
-		"google.com.svc.cluster.local":              true,
+		"api.stripe.com.svc.cluster.local":           true,
+		"api.stripe.com.cluster.local":               true,
+		"payments.default.svc.cluster.local":         false,
+		"payments.svc.cluster.local":                 false,
+		"10-0-0-1.default.pod.cluster.local":         false,
+		"api.stripe.com":                             false,
+		"google.com.svc.cluster.local":               true,
 	}
 	for name, want := range cases {
 		if got := IsSearchExpansion(name, "cluster.local"); got != want {

@@ -215,6 +215,19 @@ func (r *Resolver) Containers() map[string]string {
 	return out
 }
 
+// HostPath converts a cgroup path read from /proc/<pid>/cgroup inside a
+// private cgroup namespace (e.g. "/../../kubepods.slice/x") into the path
+// relative to the host cgroup2 root ("/kubepods.slice/x").
+func HostPath(p string) string {
+	for strings.HasPrefix(p, "/..") {
+		p = strings.TrimPrefix(p, "/..")
+	}
+	if p == "" {
+		return "/"
+	}
+	return p
+}
+
 // ProcCgroupID returns the cgroup v2 ID of a process by reading
 // /proc/<pid>/cgroup and stat'ing the directory.
 func (r *Resolver) ProcCgroupID(procRoot string, pid uint32) (uint64, error) {
@@ -224,7 +237,7 @@ func (r *Resolver) ProcCgroupID(procRoot string, pid uint32) (uint64, error) {
 	}
 	for _, line := range strings.Split(string(b), "\n") {
 		if strings.HasPrefix(line, "0::") {
-			p := strings.TrimPrefix(line, "0::")
+			p := HostPath(strings.TrimPrefix(line, "0::"))
 			var st syscall.Stat_t
 			if err := syscall.Stat(filepath.Join(r.root, p), &st); err != nil {
 				return 0, err

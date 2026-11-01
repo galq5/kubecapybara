@@ -86,4 +86,3 @@ func castSample[T any](b []byte) (*T, bool) {
 	}
 	return (*T)(unsafe.Pointer(&b[0])), true
 }
-

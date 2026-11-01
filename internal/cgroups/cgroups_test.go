@@ -34,4 +34,16 @@ func TestParsePath(t *testing.T) {
 	}
 }
 
+func TestHostPath(t *testing.T) {
+	if p := HostPath("/../../../kubepods.slice/pod.slice/x.scope"); p != "/kubepods.slice/pod.slice/x.scope" {
+		t.Fatal(p)
+	}
+	if p := HostPath("/system.slice/kubelet.service"); p != "/system.slice/kubelet.service" {
+		t.Fatal(p)
+	}
+	if p := HostPath("/.."); p != "/" {
+		t.Fatal(p)
+	}
+}
+
 const hex64 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

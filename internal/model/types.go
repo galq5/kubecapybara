@@ -41,11 +41,11 @@ type Snapshot struct {
 // Pair is TCP traffic between a client and a server endpoint as observed
 // from one socket side on this node.
 type Pair struct {
-	Client string `json:"client"`
-	Server string `json:"server"`
-	Port   uint16 `json:"port"`
-	Side   string `json:"side"`  // "client" or "server": which socket we observed
-	Owner  string `json:"owner"` // entity owning the local socket
+	Client string `json:"client,omitempty"`
+	Server string `json:"server,omitempty"`
+	Port   uint16 `json:"port,omitempty"`
+	Side   string `json:"side,omitempty"`  // "client" or "server": which socket we observed
+	Owner  string `json:"owner,omitempty"` // entity owning the local socket
 
 	RTT     Hist `json:"rtt"`
 	Connect Hist `json:"connect"`
