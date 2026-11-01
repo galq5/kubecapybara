@@ -1,7 +1,7 @@
 name: release
 
 # Push a tag like v0.1.0 to publish:
-#   - ghcr.io/<owner>/kubecapybara-agent:<version> (+ :latest; also holds /capybara-controller)
+#   - ghcr.io/<owner>/kubecapybara-agent:<version> (+ :latest; also holds /capybara-controller and /capybara-hub)
 #   - kubectl-capybara binaries attached to a GitHub release
 #   - the Helm chart as oci://ghcr.io/<owner>/charts/kubecapybara:<version>
 on:
@@ -67,6 +67,8 @@ jobs:
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o dist/capybara-agent_${GITHUB_REF_NAME}_linux_amd64 ./cmd/capybara-agent
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
             -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o dist/capybara-controller_${GITHUB_REF_NAME}_linux_amd64 ./cmd/capybara-controller
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" -o dist/capybara-hub_${GITHUB_REF_NAME}_linux_amd64 ./cmd/capybara-hub
           (cd dist && sha256sum * > checksums.txt)
       - name: create release
         env:

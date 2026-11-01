@@ -44,6 +44,8 @@ func main() {
 		resolveAfter  = flag.Duration("resolve-after", 10*time.Minute, "resolve a finding after it has not been seen for this long")
 		keepResolved  = flag.Duration("keep-resolved", time.Hour, "delete resolved findings after this long")
 		costPerGB     = flag.Float64("cost-per-gb", 0.01, "inter-zone transfer price in USD per GB per direction")
+		hubURL        = flag.String("hub", "", "read agent data from capybara-hub at this URL instead of every agent")
+		top           = flag.Int("top", 0, "with --hub: only evaluate the N busiest connections/pods plus the N with the most errors (0: all)")
 		once          = flag.Bool("once", false, "reconcile once and exit")
 		showVersion   = flag.Bool("version", false, "print the version and exit")
 	)
@@ -57,7 +59,7 @@ func main() {
 		Namespace: *namespace, Cluster: *cluster, Interval: *interval, Window: *window, Baseline: *baseline,
 		ResolveAfter: *resolveAfter, KeepResolved: *keepResolved,
 		Options: analysis.Options{ClusterDomain: *clusterDomain, CostPerGB: *costPerGB},
-	}, *minSev, *sloFile, *agentNS, *agentSelector, *agentPort, *tokenSecret, *once); err != nil {
+	}, *minSev, *sloFile, *agentNS, *agentSelector, *agentPort, *tokenSecret, *hubURL, *top, *once); err != nil {
 		log.Error("controller stopped", "err", err)
 		os.Exit(1)
 	}
@@ -93,7 +95,7 @@ func restConfig(kubeconfig string) (*rest.Config, error) {
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
 }
 
-func run(log *slog.Logger, kubeconfig string, cfg controller.Config, minSev, sloFile, agentNS, selector string, port int, tokenSecret string, once bool) error {
+func run(log *slog.Logger, kubeconfig string, cfg controller.Config, minSev, sloFile, agentNS, selector string, port int, tokenSecret, hubURL string, top int, once bool) error {
 	sev, err := parseSeverity(minSev)
 	if err != nil {
 		return err
@@ -130,12 +132,15 @@ func run(log *slog.Logger, kubeconfig string, cfg controller.Config, minSev, slo
 		notifiers = append(notifiers, &controller.Webhook{URL: u, Slack: true})
 	}
 
-	src := client.NewKubeSource(cs, agentNS, selector, port, cfg.Options.ClusterDomain, tokenSecret)
+	var src client.Source = client.NewKubeSource(cs, agentNS, selector, port, cfg.Options.ClusterDomain, tokenSecret)
+	if hubURL != "" {
+		src = &client.HubSource{URL: hubURL, CS: cs, Namespace: agentNS, TokenSecret: tokenSecret, Top: top}
+	}
 	c := controller.New(cfg, src, dyn, notifiers, log)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	log.Info("capybara-controller started", "version", version, "interval", cfg.Interval, "window", cfg.Window,
-		"notifiers", len(notifiers), "slos", len(cfg.SLOs), "min-severity", cfg.MinSeverity.String())
+		"source", src.Describe(), "notifiers", len(notifiers), "slos", len(cfg.SLOs), "min-severity", cfg.MinSeverity.String())
 	if once {
 		return c.RunOnce(ctx)
 	}

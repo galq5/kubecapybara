@@ -38,6 +38,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods/proxy"]
     verbs: ["get"]
+  {{- if .Values.hub.enabled }}
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get"]
+  {{- end }}
   {{- if .Values.auth.enabled }}
   - apiGroups: [""]
     resources: ["secrets"]

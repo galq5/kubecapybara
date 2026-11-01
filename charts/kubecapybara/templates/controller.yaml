@@ -188,6 +188,9 @@ spec:
             {{- with $c.clusterName }}
             - --cluster-name={{ . }}
             {{- end }}
+            {{- if .Values.hub.enabled }}
+            - --hub=http://{{ $fullname }}-hub.{{ .Release.Namespace }}.svc:{{ .Values.hub.port }}
+            {{- end }}
             {{- if $c.slos }}
             - --slo-file=/etc/capybara/slos.yaml
             {{- end }}

@@ -27,6 +27,9 @@ import (
 )
 
 type options struct {
+	hub           string
+	top           int
+	refresh       time.Duration
 	kubeconfig    string
 	kubeContext   string
 	namespace     string
@@ -103,6 +106,9 @@ Run without arguments for the interactive dashboard.`,
 	pf.BoolVar(&o.noColor, "no-color", false, "disable colors")
 	pf.BoolVar(&o.noK8s, "no-k8s", false, "do not query the Kubernetes API for names (with --agent)")
 	pf.StringVarP(&o.filter, "filter", "f", "", "only show rows containing this text")
+	pf.StringVar(&o.hub, "hub", "auto", "capybara-hub: auto (use it when deployed in the agent namespace), off (query every agent), or a URL")
+	pf.IntVar(&o.top, "top", 0, "with capybara-hub: only fetch the N busiest connections/pods plus the N with the most errors (0: all)")
+	pf.DurationVar(&o.refresh, "refresh", 5*time.Second, "dashboard refresh interval")
 	pf.StringVar(&o.sloFile, "slo-file", os.Getenv("CAPYBARA_SLO_FILE"), "YAML file with SLO definitions (default $CAPYBARA_SLO_FILE)")
 
 	root.AddCommand(
@@ -216,10 +222,30 @@ func (o *options) init() error {
 			}
 		}
 		o.src = ds
+	case strings.HasPrefix(o.hub, "http://") || strings.HasPrefix(o.hub, "https://"):
+		hs := &client.HubSource{URL: o.hub, Token: o.agentToken, Namespace: o.agentNS, TokenSecret: o.agentTokenSecret,
+			ScopeNamespace: o.namespace, Top: o.top}
+		if cs, err := o.kubeClient(); err == nil && !o.noK8s {
+			hs.CS = cs // reads the token Secret when --agent-token is not set
+		}
+		o.src = hs
 	default:
 		cs, err := o.kubeClient()
 		if err != nil {
 			return fmt.Errorf("loading kubeconfig: %w (use --agent URL or --from-file to run without a cluster)", err)
+		}
+		if o.hub != "off" {
+			if o.hub != "auto" {
+				return fmt.Errorf("--hub must be auto, off or a URL, not %q", o.hub)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			svc, port, err := client.DiscoverHub(ctx, cs, o.agentNS)
+			cancel()
+			if err == nil && svc != "" {
+				o.src = &client.HubSource{CS: cs, Namespace: o.agentNS, Service: svc, Port: port,
+					Token: o.agentToken, TokenSecret: o.agentTokenSecret, ScopeNamespace: o.namespace, Top: o.top}
+				return nil
+			}
 		}
 		o.src = client.NewKubeSource(cs, o.agentNS, o.agentSelector, o.agentPort, o.clusterDomain, o.agentTokenSecret)
 	}
@@ -346,7 +372,10 @@ func (o *options) runTop(ctx context.Context) error {
 	if o.output == "json" || !isatty.IsTerminal(os.Stdout.Fd()) {
 		return o.runDoctorText(ctx)
 	}
-	interval := 5 * time.Second
+	interval := o.refresh
+	if interval < time.Second {
+		interval = time.Second
+	}
 	if _, ok := o.src.(*client.FileSource); ok {
 		interval = time.Hour
 	}

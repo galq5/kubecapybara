@@ -142,6 +142,39 @@ Users of the CLI need read access to pods/services/nodes/replicasets/
 deployments/endpointslices and `pods/proxy` in the agent namespace (the chart
 binds them for `rbac.viewers`; the plain manifest has the roles to bind).
 
+### Large clusters: the hub
+
+By default the CLI asks every agent through the API server pod proxy and
+lists all pods itself. That is the fastest path on small and medium clusters
+and has no extra component. From roughly 100–200 nodes it means a lot of
+proxied requests per refresh, so the chart has an optional aggregator:
+
+```bash
+helm upgrade capybara ... --set hub.enabled=true
+kubectl capybara                  # finds the hub automatically (--hub=off bypasses it)
+kubectl capybara -n shop          # the hub filters to one namespace before sending
+kubectl capybara --top 200        # only the 200 busiest + 200 most failing connections/pods
+kubectl capybara --refresh 15s    # slower dashboard refresh
+```
+
+`capybara-hub` (a Deployment, same image):
+
+* builds cluster metadata from **informers** (one watch, no repeated LISTs of
+  every pod) and discovers agents the same way;
+* fetches agents **directly by pod IP** with bounded concurrency, and merges
+  identical concurrent requests: ten people running the dashboard cost one
+  fan-out per interval;
+* **scopes** responses (`-n`, `--top`) and prunes the metadata to the pods and
+  Services the data refers to, and gzips them;
+* forwards `profile` and `counters` to the right node's agent.
+
+A dashboard refresh becomes one request through the API server instead of
+one per node. With the hub enabled the controller reads from it too. CLI users
+need `get` on `services/proxy` in the agent namespace (bound for
+`rbac.viewers`). Hub metrics: `capybara_hub_agents`,
+`capybara_hub_fanout_last_seconds`, `capybara_hub_cache_hits_total`,
+`capybara_hub_agent_errors_total`.
+
 ### Controller: findings as Kubernetes objects, Slack and webhooks
 
 `--set controller.enabled=true` adds a single-replica Deployment
@@ -182,7 +215,7 @@ format as `--slo-file`) get burn-rate findings.
 
 `git tag v0.1.0 && git push --tags` runs `.github/workflows/release.yml`: it
 pushes the agent image to `ghcr.io/<owner>/kubecapybara-agent` (it also
-contains `/capybara-controller`), attaches CLI and controller binaries to a GitHub release and pushes the chart to
+contains `/capybara-controller` and `/capybara-hub`), attaches CLI, controller and hub binaries to a GitHub release and pushes the chart to
 `oci://ghcr.io/<owner>/charts`. For a private repository the image is private:
 create a pull secret (`kubectl create secret docker-registry ghcr
 --docker-server=ghcr.io --docker-username=<user> --docker-password=<PAT with

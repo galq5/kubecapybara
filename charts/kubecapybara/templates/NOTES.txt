@@ -31,3 +31,8 @@ on a node can read process command lines and traffic data.
 
 HTTP tracing (--l7) is enabled: it hooks every read/write syscall on the nodes.
 {{- end }}
+{{- if .Values.hub.enabled }}
+
+capybara-hub is enabled: kubectl capybara uses it automatically (--hub=off to bypass).
+For big clusters, scope what you download: kubectl capybara -n <namespace> or --top 200.
+{{- end }}

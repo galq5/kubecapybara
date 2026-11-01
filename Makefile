@@ -3,11 +3,11 @@ IMAGE   ?= ghcr.io/galq5/kubecapybara-agent
 BPFTOOL ?= bpftool
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build agent cli controller generate vmlinux test test-bpf image deploy lint clean
+.PHONY: all build agent cli controller hub generate vmlinux test test-bpf image deploy lint clean
 
 all: build
 
-build: agent cli controller
+build: agent cli controller hub
 
 agent:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/capybara-agent ./cmd/capybara-agent
@@ -17,6 +17,9 @@ cli:
 
 controller:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/capybara-controller ./cmd/capybara-controller
+
+hub:
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/capybara-hub ./cmd/capybara-hub
 
 # Recompile eBPF programs (needs clang and libbpf headers).
 generate:

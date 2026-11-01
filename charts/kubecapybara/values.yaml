@@ -118,6 +118,33 @@ metrics:
     label: grafana_dashboard
     namespace: ""
 
+# -- Hub: aggregator for large clusters (roughly 100+ nodes). Off by default:
+# on small clusters querying the agents directly is just as fast and has one
+# moving part less. When enabled, `kubectl capybara` finds it automatically
+# (opt out with --hub=off): one request per refresh through the API server
+# instead of one per node, metadata from informers instead of LISTs, and
+# -n/--top filtering done in the hub so clients download only what they show.
+hub:
+  enabled: false
+  port: 9877
+  replicas: 1
+  # -- Parallel agent requests per fan-out.
+  concurrency: 64
+  # -- Keep only the top N connections/pods per response unless the client
+  # asks otherwise (0: everything). Useful above ~500 nodes.
+  defaultTop: 0
+  # -- Memory grows with the number of pods (informer cache) and nodes
+  # (cached fan-out); 1Gi is an estimate for ~1000 nodes / 30k pods, not measured.
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  extraArgs: []
+
 # -- Controller: evaluates the doctor periodically, keeps CapyFinding objects in
 # sync (`kubectl get capyfindings -A`) and notifies Slack / webhooks when a
 # finding fires or resolves. The CRD ships in crds/ and is installed by Helm.

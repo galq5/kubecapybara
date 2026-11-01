@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -135,8 +136,63 @@ type Deployment struct {
 	Selector  map[string]string `json:"selector,omitempty"`
 }
 
+// Objects are the API objects metadata is built from (from LIST calls or
+// informer caches).
+type Objects struct {
+	Nodes       []*corev1.Node
+	Pods        []*corev1.Pod
+	Services    []*corev1.Service
+	ReplicaSets []*appsv1.ReplicaSet
+	Deployments []*appsv1.Deployment
+	// APIServer holds the EndpointSlices of the default/kubernetes Service.
+	APIServer []*discoveryv1.EndpointSlice
+}
+
 // Load reads the metadata from the API server.
 func Load(ctx context.Context, cs kubernetes.Interface, clusterDomain string) (*Meta, error) {
+	var o Objects
+	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
+	}
+	for i := range nodes.Items {
+		o.Nodes = append(o.Nodes, &nodes.Items[i])
+	}
+	pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list pods: %w", err)
+	}
+	for i := range pods.Items {
+		o.Pods = append(o.Pods, &pods.Items[i])
+	}
+	svcs, err := cs.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+	for i := range svcs.Items {
+		o.Services = append(o.Services, &svcs.Items[i])
+	}
+	// optional: workload ownership (RBAC may forbid; degrade gracefully)
+	if rss, err := cs.AppsV1().ReplicaSets("").List(ctx, metav1.ListOptions{}); err == nil {
+		for i := range rss.Items {
+			o.ReplicaSets = append(o.ReplicaSets, &rss.Items[i])
+		}
+	}
+	if deps, err := cs.AppsV1().Deployments("").List(ctx, metav1.ListOptions{}); err == nil {
+		for i := range deps.Items {
+			o.Deployments = append(o.Deployments, &deps.Items[i])
+		}
+	}
+	if slices, err := cs.DiscoveryV1().EndpointSlices("default").List(ctx, metav1.ListOptions{LabelSelector: "kubernetes.io/service-name=kubernetes"}); err == nil {
+		for i := range slices.Items {
+			o.APIServer = append(o.APIServer, &slices.Items[i])
+		}
+	}
+	return FromObjects(o, clusterDomain), nil
+}
+
+// FromObjects builds and indexes metadata from API objects.
+func FromObjects(o Objects, clusterDomain string) *Meta {
 	m := &Meta{
 		Loaded:        time.Now(),
 		ClusterDomain: clusterDomain,
@@ -145,12 +201,7 @@ func Load(ctx context.Context, cs kubernetes.Interface, clusterDomain string) (*
 		ReplicaSets:   map[string]*ReplicaSet{},
 		Deployments:   map[string]*Deployment{},
 	}
-	nodes, err := cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list nodes: %w", err)
-	}
-	for i := range nodes.Items {
-		n := &nodes.Items[i]
+	for _, n := range o.Nodes {
 		node := &Node{
 			Name:    n.Name,
 			Zone:    firstLabel(n.Labels, "topology.kubernetes.io/zone", "failure-domain.beta.kubernetes.io/zone"),
@@ -164,20 +215,11 @@ func Load(ctx context.Context, cs kubernetes.Interface, clusterDomain string) (*
 		}
 		m.Nodes[n.Name] = node
 	}
-	pods, err := cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list pods: %w", err)
+	for _, p := range o.Pods {
+		pod := convertPod(p)
+		m.Pods[pod.UID] = pod
 	}
-	for i := range pods.Items {
-		p := convertPod(&pods.Items[i])
-		m.Pods[p.UID] = p
-	}
-	svcs, err := cs.CoreV1().Services("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return nil, fmt.Errorf("list services: %w", err)
-	}
-	for i := range svcs.Items {
-		s := &svcs.Items[i]
+	for _, s := range o.Services {
 		svc := &Service{Namespace: s.Namespace, Name: s.Name, Type: string(s.Spec.Type), Selector: s.Spec.Selector}
 		for _, ip := range s.Spec.ClusterIPs {
 			if ip != "" && ip != corev1.ClusterIPNone {
@@ -189,39 +231,34 @@ func Load(ctx context.Context, cs kubernetes.Interface, clusterDomain string) (*
 		}
 		m.Services = append(m.Services, svc)
 	}
-	// optional: workload ownership (RBAC may forbid; degrade gracefully)
-	if rss, err := cs.AppsV1().ReplicaSets("").List(ctx, metav1.ListOptions{}); err == nil {
-		for i := range rss.Items {
-			m.addRS(&rss.Items[i])
-		}
+	sort.Slice(m.Services, func(i, j int) bool {
+		a, b := m.Services[i], m.Services[j]
+		return a.Namespace+"/"+a.Name < b.Namespace+"/"+b.Name
+	})
+	for _, rs := range o.ReplicaSets {
+		m.addRS(rs)
 	}
-	if deps, err := cs.AppsV1().Deployments("").List(ctx, metav1.ListOptions{}); err == nil {
-		for i := range deps.Items {
-			d := &deps.Items[i]
-			dep := &Deployment{Namespace: d.Namespace, Name: d.Name, Revision: d.Annotations["deployment.kubernetes.io/revision"]}
-			if d.Spec.Selector != nil {
-				dep.Selector = d.Spec.Selector.MatchLabels
-			}
-			m.Deployments[d.Namespace+"/"+d.Name] = dep
+	for _, d := range o.Deployments {
+		dep := &Deployment{Namespace: d.Namespace, Name: d.Name, Revision: d.Annotations["deployment.kubernetes.io/revision"]}
+		if d.Spec.Selector != nil {
+			dep.Selector = d.Spec.Selector.MatchLabels
 		}
+		m.Deployments[d.Namespace+"/"+d.Name] = dep
 	}
-	// apiserver endpoints
-	m.apiServerIPs = map[string]bool{}
-	m.APIServerIPs = nil
-	if slices, err := cs.DiscoveryV1().EndpointSlices("default").List(ctx, metav1.ListOptions{LabelSelector: "kubernetes.io/service-name=kubernetes"}); err == nil {
-		for _, sl := range slices.Items {
-			for _, ep := range sl.Endpoints {
-				for _, a := range ep.Addresses {
-					m.apiServerIPs[a] = true
+	seen := map[string]bool{}
+	for _, sl := range o.APIServer {
+		for _, ep := range sl.Endpoints {
+			for _, a := range ep.Addresses {
+				if !seen[a] {
+					seen[a] = true
+					m.APIServerIPs = append(m.APIServerIPs, a)
 				}
 			}
 		}
 	}
-	for ip := range m.apiServerIPs {
-		m.APIServerIPs = append(m.APIServerIPs, ip)
-	}
+	sort.Strings(m.APIServerIPs)
 	m.Index()
-	return m, nil
+	return m
 }
 
 func (m *Meta) addRS(rs *appsv1.ReplicaSet) {

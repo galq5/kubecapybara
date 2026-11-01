@@ -1,0 +1,158 @@
+{{- if .Values.hub.enabled }}
+{{- $fullname := include "capybara.fullname" . }}
+{{- $h := .Values.hub }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-hub
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+---
+# Informers on cluster metadata (watch instead of repeated LISTs), events
+# and ConfigMaps for the change timeline.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $fullname }}-hub
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events", "configmaps"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $fullname }}-hub
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $fullname }}-hub
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fullname }}-hub
+    namespace: {{ .Release.Namespace }}
+---
+# kubectl capybara finds the hub by the app.kubernetes.io/name label.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-hub
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+    app.kubernetes.io/name: capybara-hub
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    app.kubernetes.io/name: capybara-hub
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ $h.port }}
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-hub
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+    app.kubernetes.io/name: capybara-hub
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  # Stateless (caches only): more replicas are fine, each watches the API.
+  replicas: {{ $h.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: capybara-hub
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "capybara.labels" . | nindent 8 }}
+        app.kubernetes.io/name: capybara-hub
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- if .Values.metrics.podAnnotations }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $h.port | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $fullname }}-hub
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with $h.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $h.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: hub
+          image: {{ include "capybara.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/capybara-hub"]
+          args:
+            - --listen=:{{ $h.port }}
+            - --agent-namespace={{ .Release.Namespace }}
+            - --agent-selector=app.kubernetes.io/name=capybara-agent,app.kubernetes.io/instance={{ .Release.Name }}
+            - --agent-port={{ .Values.agent.port }}
+            - --cluster-domain={{ .Values.agent.clusterDomain }}
+            - --concurrency={{ $h.concurrency }}
+            - --cache-ttl={{ .Values.agent.interval }}
+            - --default-top={{ $h.defaultTop }}
+            {{- range $h.extraArgs }}
+            - {{ . }}
+            {{- end }}
+          {{- if .Values.auth.enabled }}
+          env:
+            - name: CAPYBARA_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.secretName }}
+                  key: token
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $h.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml $h.resources | nindent 12 }}
+{{- end }}
