@@ -1,0 +1,555 @@
+package model
+
+import (
+	"sort"
+	"time"
+)
+
+// Off-CPU state names used in SchedStats.OffNs.
+const (
+	StateRunQ  = "runq"
+	StateDisk  = "disk"
+	StateNet   = "net"
+	StatePoll  = "poll"
+	StateLock  = "lock"
+	StateSleep = "sleep"
+	StateOther = "other"
+)
+
+// OffStates lists off-CPU states in kernel index order.
+var OffStates = []string{StateRunQ, StateDisk, StateNet, StatePoll, StateLock, StateSleep, StateOther}
+
+// Snapshot is what an agent returns for a time range. All counters are
+// totals over [From, To]; gauges are the latest value in the range.
+type Snapshot struct {
+	Node       string                  `json:"node"`
+	Version    string                  `json:"version,omitempty"`
+	From       time.Time               `json:"from"`
+	To         time.Time               `json:"to"`
+	Collectors map[string]string       `json:"collectors,omitempty"` // name -> "ok" or error
+	Pairs      []*Pair                 `json:"pairs,omitempty"`
+	Entities   map[string]*EntityStats `json:"entities,omitempty"`
+	Drops      []*Drop                 `json:"drops,omitempty"`
+	NodeStats  NodeStats               `json:"nodeStats"`
+	DNSNames   map[string]string       `json:"dnsNames,omitempty"` // ip -> hostname learned from DNS answers
+	Events     []Event                 `json:"events,omitempty"`
+	Listens    []Listen                `json:"listens,omitempty"`
+	Crashes    []CrashReport           `json:"crashes,omitempty"`
+	Startups   []Startup               `json:"startups,omitempty"`
+}
+
+// Pair is TCP traffic between a client and a server endpoint as observed
+// from one socket side on this node.
+type Pair struct {
+	Client string `json:"client"`
+	Server string `json:"server"`
+	Port   uint16 `json:"port"`
+	Side   string `json:"side"`  // "client" or "server": which socket we observed
+	Owner  string `json:"owner"` // entity owning the local socket
+
+	RTT     Hist `json:"rtt"`
+	Connect Hist `json:"connect"`
+
+	BytesTx      uint64 `json:"bytesTx,omitempty"`
+	BytesRx      uint64 `json:"bytesRx,omitempty"`
+	Connects     uint64 `json:"connects,omitempty"`
+	Closes       uint64 `json:"closes,omitempty"`
+	LifetimeUs   uint64 `json:"lifetimeUs,omitempty"`
+	Refused      uint64 `json:"refused,omitempty"`
+	Timeouts     uint64 `json:"timeouts,omitempty"`
+	SynRetrans   uint64 `json:"synRetrans,omitempty"`
+	Retrans      uint64 `json:"retrans,omitempty"`
+	RetransLarge uint64 `json:"retransLarge,omitempty"`
+	RstSent      uint64 `json:"rstSent,omitempty"`
+	RstRcvd      uint64 `json:"rstRcvd,omitempty"`
+	MTUReduced   uint64 `json:"mtuReduced,omitempty"`
+}
+
+// PairKey identifies a Pair.
+type PairKey struct {
+	Client, Server string
+	Port           uint16
+	Side, Owner    string
+}
+
+// Key returns the identity of the pair.
+func (p *Pair) Key() PairKey {
+	return PairKey{p.Client, p.Server, p.Port, p.Side, p.Owner}
+}
+
+// Add merges counters of o into p.
+func (p *Pair) Add(o *Pair) {
+	p.RTT.Add(o.RTT)
+	p.Connect.Add(o.Connect)
+	p.BytesTx += o.BytesTx
+	p.BytesRx += o.BytesRx
+	p.Connects += o.Connects
+	p.Closes += o.Closes
+	p.LifetimeUs += o.LifetimeUs
+	p.Refused += o.Refused
+	p.Timeouts += o.Timeouts
+	p.SynRetrans += o.SynRetrans
+	p.Retrans += o.Retrans
+	p.RetransLarge += o.RetransLarge
+	p.RstSent += o.RstSent
+	p.RstRcvd += o.RstRcvd
+	p.MTUReduced += o.MTUReduced
+}
+
+// Clone returns a deep copy.
+func (p *Pair) Clone() *Pair {
+	c := *p
+	c.RTT = Hist{}
+	c.Connect = Hist{}
+	c.RTT.Add(p.RTT)
+	c.Connect.Add(p.Connect)
+	return &c
+}
+
+// EntityStats holds everything known about one workload entity on a node.
+// An entity is a pod ("pod:<uid>") or a host cgroup ("host:<path>").
+type EntityStats struct {
+	ID         string                   `json:"id"`
+	PodUID     string                   `json:"podUID,omitempty"`
+	Cgroup     string                   `json:"cgroup,omitempty"`
+	Sched      *SchedStats              `json:"sched,omitempty"`
+	IO         *IOStats                 `json:"io,omitempty"`
+	Res        *Resources               `json:"res,omitempty"`
+	DNS        *DNSStats                `json:"dns,omitempty"`
+	DNSServer  *DNSStats                `json:"dnsServer,omitempty"`
+	HTTP       map[string]*HTTPEndpoint `json:"http,omitempty"`
+	ConnErrors map[string]uint64        `json:"connErrors,omitempty"`
+}
+
+// Merge adds o into e.
+func (e *EntityStats) Merge(o *EntityStats) {
+	if e.PodUID == "" {
+		e.PodUID = o.PodUID
+	}
+	if e.Cgroup == "" {
+		e.Cgroup = o.Cgroup
+	}
+	if o.Sched != nil {
+		if e.Sched == nil {
+			e.Sched = &SchedStats{}
+		}
+		e.Sched.Merge(o.Sched)
+	}
+	if o.IO != nil {
+		if e.IO == nil {
+			e.IO = &IOStats{}
+		}
+		e.IO.Merge(o.IO)
+	}
+	if o.Res != nil {
+		if e.Res == nil {
+			e.Res = &Resources{}
+		}
+		e.Res.Merge(o.Res)
+	}
+	if o.DNS != nil {
+		if e.DNS == nil {
+			e.DNS = &DNSStats{}
+		}
+		e.DNS.Merge(o.DNS)
+	}
+	if o.DNSServer != nil {
+		if e.DNSServer == nil {
+			e.DNSServer = &DNSStats{}
+		}
+		e.DNSServer.Merge(o.DNSServer)
+	}
+	for k, v := range o.HTTP {
+		if e.HTTP == nil {
+			e.HTTP = map[string]*HTTPEndpoint{}
+		}
+		if cur, ok := e.HTTP[k]; ok {
+			cur.Merge(v)
+		} else {
+			c := *v
+			c.Status = copyMap(v.Status)
+			c.Lat = Hist{}
+			c.Lat.Add(v.Lat)
+			e.HTTP[k] = &c
+		}
+	}
+	for k, v := range o.ConnErrors {
+		if e.ConnErrors == nil {
+			e.ConnErrors = map[string]uint64{}
+		}
+		e.ConnErrors[k] += v
+	}
+}
+
+// SchedStats is the thread time breakdown of an entity.
+type SchedStats struct {
+	OnCPUNs      uint64            `json:"oncpuNs,omitempty"`
+	OffNs        map[string]uint64 `json:"offNs,omitempty"`
+	RunQ         Hist              `json:"runq"`
+	ReclaimNs    uint64            `json:"reclaimNs,omitempty"`
+	ReclaimCount uint64            `json:"reclaimCount,omitempty"`
+	Wakeups      uint64            `json:"wakeups,omitempty"`
+	// Culprits: entity ID -> nanoseconds of run queue delay it caused us.
+	Culprits map[string]uint64 `json:"culprits,omitempty"`
+}
+
+// Merge adds o into s.
+func (s *SchedStats) Merge(o *SchedStats) {
+	s.OnCPUNs += o.OnCPUNs
+	for k, v := range o.OffNs {
+		if s.OffNs == nil {
+			s.OffNs = map[string]uint64{}
+		}
+		s.OffNs[k] += v
+	}
+	s.RunQ.Add(o.RunQ)
+	s.ReclaimNs += o.ReclaimNs
+	s.ReclaimCount += o.ReclaimCount
+	s.Wakeups += o.Wakeups
+	for k, v := range o.Culprits {
+		if s.Culprits == nil {
+			s.Culprits = map[string]uint64{}
+		}
+		s.Culprits[k] += v
+	}
+}
+
+// TotalNs returns total accounted thread time.
+func (s *SchedStats) TotalNs() uint64 {
+	t := s.OnCPUNs
+	for _, v := range s.OffNs {
+		t += v
+	}
+	return t
+}
+
+// IOStats is block I/O issued by an entity.
+type IOStats struct {
+	ReadBytes  uint64 `json:"readBytes,omitempty"`
+	WriteBytes uint64 `json:"writeBytes,omitempty"`
+	ReadOps    uint64 `json:"readOps,omitempty"`
+	WriteOps   uint64 `json:"writeOps,omitempty"`
+	Lat        Hist   `json:"lat"`
+}
+
+// Merge adds o into s.
+func (s *IOStats) Merge(o *IOStats) {
+	s.ReadBytes += o.ReadBytes
+	s.WriteBytes += o.WriteBytes
+	s.ReadOps += o.ReadOps
+	s.WriteOps += o.WriteOps
+	s.Lat.Add(o.Lat)
+}
+
+// Resources are cgroup filesystem statistics of a pod.
+type Resources struct {
+	// gauges (latest)
+	MemCurrent    uint64    `json:"memCurrent,omitempty"`
+	MemMax        uint64    `json:"memMax,omitempty"` // 0 = unlimited
+	CPUQuotaMilli uint64    `json:"cpuQuotaMilli,omitempty"`
+	PSICPU        float64   `json:"psiCpu,omitempty"` // "some" avg10 %
+	PSIMem        float64   `json:"psiMem,omitempty"`
+	PSIIO         float64   `json:"psiIo,omitempty"`
+	SampledAt     time.Time `json:"sampledAt,omitempty"`
+	// counters (deltas)
+	CPUUsageUs  uint64 `json:"cpuUsageUs,omitempty"`
+	Periods     uint64 `json:"periods,omitempty"`
+	Throttled   uint64 `json:"throttled,omitempty"`
+	ThrottledUs uint64 `json:"throttledUs,omitempty"`
+	OOMKills    uint64 `json:"oomKills,omitempty"`
+	WallUs      uint64 `json:"wallUs,omitempty"` // sampling wall time covered by the counters
+	MemPeak     uint64 `json:"memPeak,omitempty"`
+}
+
+// Merge adds o into r (gauges take the latest sample).
+func (r *Resources) Merge(o *Resources) {
+	if !o.SampledAt.Before(r.SampledAt) {
+		r.MemCurrent = o.MemCurrent
+		r.MemMax = o.MemMax
+		r.CPUQuotaMilli = o.CPUQuotaMilli
+		r.PSICPU = o.PSICPU
+		r.PSIMem = o.PSIMem
+		r.PSIIO = o.PSIIO
+		r.SampledAt = o.SampledAt
+	}
+	if o.MemPeak > r.MemPeak {
+		r.MemPeak = o.MemPeak
+	}
+	if o.MemCurrent > r.MemPeak {
+		r.MemPeak = o.MemCurrent
+	}
+	r.CPUUsageUs += o.CPUUsageUs
+	r.Periods += o.Periods
+	r.Throttled += o.Throttled
+	r.ThrottledUs += o.ThrottledUs
+	r.OOMKills += o.OOMKills
+	r.WallUs += o.WallUs
+}
+
+// DNSStats summarises DNS traffic of an entity (as a client or a server).
+type DNSStats struct {
+	Queries    uint64              `json:"queries,omitempty"`
+	Responses  uint64              `json:"responses,omitempty"`
+	Timeouts   uint64              `json:"timeouts,omitempty"`
+	RCodes     map[string]uint64   `json:"rcodes,omitempty"`
+	Lat        Hist                `json:"lat"`
+	NdotsWaste uint64              `json:"ndotsWaste,omitempty"`
+	Names      map[string]*DNSName `json:"names,omitempty"`
+}
+
+// DNSName is per query name statistics.
+type DNSName struct {
+	Count    uint64 `json:"count,omitempty"`
+	NXDomain uint64 `json:"nx,omitempty"`
+	Errors   uint64 `json:"err,omitempty"`
+	Timeouts uint64 `json:"timeouts,omitempty"`
+	LatSumUs uint64 `json:"latSumUs,omitempty"`
+	Answered uint64 `json:"answered,omitempty"`
+}
+
+// MaxDNSNames bounds the number of distinct names tracked per entity.
+const MaxDNSNames = 300
+
+// Merge adds o into d.
+func (d *DNSStats) Merge(o *DNSStats) {
+	d.Queries += o.Queries
+	d.Responses += o.Responses
+	d.Timeouts += o.Timeouts
+	d.NdotsWaste += o.NdotsWaste
+	d.Lat.Add(o.Lat)
+	for k, v := range o.RCodes {
+		if d.RCodes == nil {
+			d.RCodes = map[string]uint64{}
+		}
+		d.RCodes[k] += v
+	}
+	for k, v := range o.Names {
+		if d.Names == nil {
+			d.Names = map[string]*DNSName{}
+		}
+		cur, ok := d.Names[k]
+		if !ok {
+			if len(d.Names) >= MaxDNSNames {
+				continue
+			}
+			cur = &DNSName{}
+			d.Names[k] = cur
+		}
+		cur.Count += v.Count
+		cur.NXDomain += v.NXDomain
+		cur.Errors += v.Errors
+		cur.Timeouts += v.Timeouts
+		cur.LatSumUs += v.LatSumUs
+		cur.Answered += v.Answered
+	}
+}
+
+// Name returns (creating if needed and allowed) the stats for a name.
+func (d *DNSStats) Name(n string) *DNSName {
+	if d.Names == nil {
+		d.Names = map[string]*DNSName{}
+	}
+	if v, ok := d.Names[n]; ok {
+		return v
+	}
+	if len(d.Names) >= MaxDNSNames {
+		n = "(other)"
+		if v, ok := d.Names[n]; ok {
+			return v
+		}
+	}
+	v := &DNSName{}
+	d.Names[n] = v
+	return v
+}
+
+// HTTPEndpoint aggregates HTTP/1.x requests for one route.
+type HTTPEndpoint struct {
+	Role   string            `json:"role"` // client or server
+	Method string            `json:"method"`
+	Path   string            `json:"path"`
+	Count  uint64            `json:"count"`
+	Status map[string]uint64 `json:"status,omitempty"` // "2xx" ... "5xx"
+	Lat    Hist              `json:"lat"`
+}
+
+// Merge adds o into h.
+func (h *HTTPEndpoint) Merge(o *HTTPEndpoint) {
+	h.Count += o.Count
+	h.Lat.Add(o.Lat)
+	for k, v := range o.Status {
+		if h.Status == nil {
+			h.Status = map[string]uint64{}
+		}
+		h.Status[k] += v
+	}
+}
+
+// Errors returns the number of 5xx responses.
+func (h *HTTPEndpoint) Errors() uint64 { return h.Status["5xx"] }
+
+// Drop is a count of dropped packets for a flow and reason.
+type Drop struct {
+	Src    string `json:"src"`
+	Dst    string `json:"dst"`
+	Port   uint16 `json:"port,omitempty"`
+	Proto  string `json:"proto"`
+	Reason string `json:"reason"`
+	Count  uint64 `json:"count"`
+}
+
+// DropKey identifies a Drop.
+type DropKey struct {
+	Src, Dst      string
+	Port          uint16
+	Proto, Reason string
+}
+
+// Key returns the identity of the drop.
+func (d *Drop) Key() DropKey { return DropKey{d.Src, d.Dst, d.Port, d.Proto, d.Reason} }
+
+// NodeStats are node-level health metrics.
+type NodeStats struct {
+	CPUs                  int       `json:"cpus,omitempty"`
+	Load1                 float64   `json:"load1,omitempty"`
+	ConntrackCount        uint64    `json:"conntrackCount,omitempty"`
+	ConntrackMax          uint64    `json:"conntrackMax,omitempty"`
+	ConntrackInsertFailed uint64    `json:"conntrackInsertFailed,omitempty"` // delta
+	ConntrackDrop         uint64    `json:"conntrackDrop,omitempty"`         // delta
+	ConntrackEarlyDrop    uint64    `json:"conntrackEarlyDrop,omitempty"`    // delta
+	PSICPU                float64   `json:"psiCpu,omitempty"`
+	PSIMem                float64   `json:"psiMem,omitempty"`
+	PSIIO                 float64   `json:"psiIo,omitempty"`
+	SampledAt             time.Time `json:"sampledAt,omitempty"`
+}
+
+// Merge adds o into n (gauges take the latest sample).
+func (n *NodeStats) Merge(o NodeStats) {
+	if !o.SampledAt.Before(n.SampledAt) {
+		n.CPUs = o.CPUs
+		n.Load1 = o.Load1
+		n.ConntrackCount = o.ConntrackCount
+		n.ConntrackMax = o.ConntrackMax
+		n.PSICPU = o.PSICPU
+		n.PSIMem = o.PSIMem
+		n.PSIIO = o.PSIIO
+		n.SampledAt = o.SampledAt
+	}
+	n.ConntrackInsertFailed += o.ConntrackInsertFailed
+	n.ConntrackDrop += o.ConntrackDrop
+	n.ConntrackEarlyDrop += o.ConntrackEarlyDrop
+}
+
+// Event types.
+const (
+	EvExec        = "exec"
+	EvExecSession = "exec_session" // interactive exec into a container (kubectl exec -it)
+	EvShell       = "suspicious_shell"
+	EvExit        = "exit"
+	EvSignal      = "signal"
+	EvOOM         = "oom"
+	EvListen      = "listen"
+	EvConnect     = "connect"
+	EvConnFail    = "conn_fail"
+	EvDNSFail     = "dns_fail"
+	EvDNSQuery    = "dns_query"
+	EvHTTPError   = "http_5xx"
+	EvRetrans     = "retrans"
+)
+
+// Severities.
+const (
+	SevInfo = "info"
+	SevWarn = "warn"
+	SevCrit = "crit"
+)
+
+// Event is a notable occurrence attributed to an entity.
+type Event struct {
+	Time     time.Time         `json:"time"`
+	Entity   string            `json:"entity"`
+	Type     string            `json:"type"`
+	Severity string            `json:"sev,omitempty"`
+	PID      uint32            `json:"pid,omitempty"`
+	Comm     string            `json:"comm,omitempty"`
+	Message  string            `json:"msg"`
+	Fields   map[string]string `json:"fields,omitempty"`
+}
+
+// Listen is a listening socket owned by an entity.
+type Listen struct {
+	Entity string    `json:"entity"`
+	Port   uint16    `json:"port"`
+	Addr   string    `json:"addr"`
+	Comm   string    `json:"comm,omitempty"`
+	Time   time.Time `json:"time"`
+}
+
+// ResourceSample is one flight-recorder sample of an entity's resources.
+type ResourceSample struct {
+	Time         time.Time `json:"t"`
+	MemCurrent   uint64    `json:"mem"`
+	MemMax       uint64    `json:"memMax,omitempty"`
+	CPUMilli     float64   `json:"cpuMilli"`
+	ThrottledPct float64   `json:"throttledPct,omitempty"`
+}
+
+// CrashReport is a frozen flight recorder snapshot taken when a container
+// died abnormally.
+type CrashReport struct {
+	Entity string           `json:"entity"`
+	Time   time.Time        `json:"time"`
+	Reason string           `json:"reason"`
+	Events []Event          `json:"events"`
+	Series []ResourceSample `json:"series,omitempty"`
+}
+
+// Startup is the timeline of the first moments of a new entity.
+type Startup struct {
+	Entity    string    `json:"entity"`
+	FirstSeen time.Time `json:"firstSeen"`
+	Events    []Event   `json:"events"`
+}
+
+// Profile is the result of an on-demand CPU profile.
+type Profile struct {
+	Entity   string        `json:"entity"`
+	Node     string        `json:"node"`
+	Duration time.Duration `json:"duration"`
+	Hz       int           `json:"hz"`
+	Samples  uint64        `json:"samples"`
+	Stacks   []Stack       `json:"stacks"`
+}
+
+// Stack is a folded stack (root first) with its sample count.
+type Stack struct {
+	Comm   string   `json:"comm"`
+	Frames []string `json:"frames"`
+	Count  uint64   `json:"count"`
+}
+
+func copyMap(m map[string]uint64) map[string]uint64 {
+	if m == nil {
+		return nil
+	}
+	c := make(map[string]uint64, len(m))
+	for k, v := range m {
+		c[k] = v
+	}
+	return c
+}
+
+// SortedKeys returns map keys sorted by descending value.
+func SortedKeys(m map[string]uint64) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]] == m[keys[j]] {
+			return keys[i] < keys[j]
+		}
+		return m[keys[i]] > m[keys[j]]
+	})
+	return keys
+}
