@@ -390,6 +390,8 @@ func (v *View) buildEdges(listeners map[string]string) {
 			stats = f.clientSide.Clone()
 			// resets sent by the server are only visible server side
 			stats.RstSent += f.serverSide.RstSent
+			// the server socket sees the client's window (slow clients)
+			stats.ZeroWindow += f.serverSide.ZeroWindow
 			side = "both"
 		case f.clientSide != nil:
 			stats = f.clientSide.Clone()

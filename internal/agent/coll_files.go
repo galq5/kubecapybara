@@ -69,8 +69,13 @@ func (c *filesCollector) Start(a *Agent) error {
 		{"fsync", func() error { return c.l.tracepoint("syscalls", "sys_enter_fsync", p.EnterFsync) }, func() error { return c.l.tracepoint("syscalls", "sys_exit_fsync", p.ExitFsync) }},
 		{"fdatasync", func() error { return c.l.tracepoint("syscalls", "sys_enter_fdatasync", p.EnterFdatasync) }, func() error { return c.l.tracepoint("syscalls", "sys_exit_fdatasync", p.ExitFdatasync) }},
 	} {
-		// attach the exit first so no entry is left without its exit
-		if err := errors.Join(x.leave(), x.enter()); err != nil {
+		// attach the exit first and the entry only if the exit worked, so no
+		// start record is left without its exit
+		err := x.leave()
+		if err == nil {
+			err = x.enter()
+		}
+		if err != nil {
 			if x.sc == "read" || x.sc == "write" {
 				return err
 			}

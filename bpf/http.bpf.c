@@ -128,19 +128,25 @@ static __always_inline int is_response(const char *b)
 	return b[0] == 'H' && b[1] == 'T' && b[2] == 'T' && b[3] == 'P' && b[4] == '/';
 }
 
-/* database client requests (only checked for writes) */
-static __always_inline __u8 db_proto(const char *b, __u32 n)
+/* database client requests (only checked for writes). The length fields of
+ * the protocols must agree with the size of the write to keep unrelated
+ * binary writes (other protocols, files) out. */
+static __always_inline __u8 db_proto(const char *b, __s64 len)
 {
 	__u8 b0 = b[0], b1 = b[1], b2 = b[2], b3 = b[3], b4 = b[4];
+	__u32 plen;
 
-	/* PostgreSQL: type byte + big endian int32 length (< 16MiB) */
-	if ((b0 == 'Q' || b0 == 'P' || b0 == 'B') && b1 == 0 && (b2 | b3 | b4) != 0)
+	/* PostgreSQL: type byte + big endian int32 length that fits in the write
+	 * (several messages, e.g. Parse+Bind+Execute+Sync, may follow) */
+	plen = ((__u32)b1 << 24) | ((__u32)b2 << 16) | ((__u32)b3 << 8) | b4;
+	if ((b0 == 'Q' || b0 == 'P' || b0 == 'B') && b1 == 0 && plen >= 4 && (__s64)plen + 1 <= len)
 		return PROTO_POSTGRES;
 	/* Redis RESP array: "*<n>\r\n$" */
 	if (b0 == '*' && b1 >= '1' && b1 <= '9' && (b2 == '\r' || (b2 >= '0' && b2 <= '9')))
 		return PROTO_REDIS;
-	/* MySQL: 3 byte LE length, sequence 0, COM_QUERY */
-	if (b3 == 0 && b4 == 0x03 && (b0 | b1 | b2) != 0)
+	/* MySQL: 3 byte LE payload length, sequence 0, COM_QUERY; one packet */
+	plen = (__u32)b0 | ((__u32)b1 << 8) | ((__u32)b2 << 16);
+	if (b3 == 0 && b4 == 0x03 && plen >= 1 && (__s64)plen + 4 == len)
 		return PROTO_MYSQL;
 	return 0;
 }
@@ -204,7 +210,7 @@ static __always_inline void on_data(__u32 fd, __u64 buf, __s64 len, int is_read)
 		return;
 	}
 	if (!is_read) {
-		__u8 proto = db_proto(req->req, n);
+		__u8 proto = db_proto(req->req, len);
 
 		if (proto) {
 			req->ts = bpf_ktime_get_ns();

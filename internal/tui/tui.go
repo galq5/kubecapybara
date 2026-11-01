@@ -553,8 +553,18 @@ func (m *model) renderText(b *bytes.Buffer) {
 		render.Section(b, st, "Slowest paths (RTT p99)")
 		render.Edges(b, st, v, f, "rtt", 8)
 	case "Network":
-		if e := m.edges[m.detail]; e != nil {
-			render.EdgeDetail(b, st, v, e)
+		// look the edge up in the current data so the view refreshes
+		var edge *analysis.Edge
+		for _, e := range v.Edges {
+			if edgeKey(e) == m.detail {
+				edge = e
+				break
+			}
+		}
+		if edge != nil {
+			render.EdgeDetail(b, st, v, edge)
+		} else {
+			fmt.Fprintln(b, st.Dim("this connection has no traffic in the current window"))
 		}
 		fmt.Fprintln(b, st.Dim("\nesc: back to the list"))
 	case "Pods":

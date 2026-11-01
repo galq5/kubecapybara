@@ -152,3 +152,82 @@ func TestAddPodEvents(t *testing.T) {
 		t.Fatalf("advice: %v", rep.Advice)
 	}
 }
+
+func TestRightsizeNoCPUData(t *testing.T) {
+	snaps, meta := fixture(t)
+	meta.Pods["fe-1"].Containers = []k8smeta.Container{{Name: "app", CPURequestMilli: 2000}}
+	// frontend only has DNS stats: no CPU measurement at all
+	v := Build(snaps, meta, Options{})
+	for _, r := range Rightsize(v, DefaultPricing) {
+		if r.Workload == "shop/Deployment/frontend" {
+			if r.Verdict != "no-data" || r.CPURec != 0 || r.MonthlyUSD != 0 {
+				t.Fatalf("pod without CPU data got a recommendation: %+v", r)
+			}
+			return
+		}
+	}
+	t.Fatal("frontend row missing")
+}
+
+func TestRightsizeUsesWindowPeak(t *testing.T) {
+	snaps, meta := fixture(t)
+	meta.Pods["pay-new"].Containers[0].CPURequestMilli = 2000
+	meta.Pods["pay-old"].Containers[0].CPURequestMilli = 2000
+	// a burst an hour ago survives in the rolled-up peak, not in the 10 minute series
+	snaps[1].Entities["pod:pay-new"].Res = &model.Resources{CPUUsageUs: 3e6, WallUs: 60e6, CPUPeakMilli: 1500}
+	v := Build(snaps, meta, Options{})
+	for _, r := range Rightsize(v, DefaultPricing) {
+		if r.Workload == "shop/Deployment/payments" {
+			if r.CPUPeak != 1500 || r.CPURec != 1800 || r.Verdict == "over" {
+				t.Fatalf("window peak ignored: %+v", r)
+			}
+			return
+		}
+	}
+	t.Fatal("payments row missing")
+}
+
+func TestSlowNodeThreeNodes(t *testing.T) {
+	m := NodeMatrix{Nodes: []string{"w1", "w2", "w3"}, RTT: map[string]map[string]*model.Hist{}}
+	set := func(a, b string, us uint64) {
+		if m.RTT[a] == nil {
+			m.RTT[a] = map[string]*model.Hist{}
+		}
+		h := hist(us, 20)
+		m.RTT[a][b] = &h
+	}
+	set("w1", "w2", 300)
+	set("w1", "w3", 9000)
+	set("w2", "w3", 9000)
+	slow := m.SlowNodes()
+	if _, ok := slow["w3"]; !ok || len(slow) != 1 {
+		t.Fatalf("expected only w3 to be slow, got %v", slow)
+	}
+}
+
+func TestServiceBalanceIgnoresTinyTraffic(t *testing.T) {
+	snaps, meta := fixture(t)
+	snaps[1].Pairs[0].Connects, snaps[1].Pairs[0].BytesTx, snaps[1].Pairs[0].BytesRx = 1, 200, 0
+	snaps[1].Pairs[1].Connects, snaps[1].Pairs[1].BytesTx, snaps[1].Pairs[1].BytesRx = 0, 0, 0
+	snaps[0].Pairs = nil
+	v := Build(snaps, meta, Options{})
+	if sbs := ServiceBalances(v); len(sbs) != 0 {
+		t.Fatalf("200 bytes must not be judged: %+v", sbs)
+	}
+}
+
+func TestMergeFoldsOverflowIntoOther(t *testing.T) {
+	e := &model.EntityStats{}
+	for i := 0; i < model.MaxDBQueries+5; i++ {
+		e.Merge(&model.EntityStats{DB: map[string]*model.DBQuery{
+			"2|q" + string(rune('A'+i%26)) + string(rune('a'+i/26)): {Proto: "postgres", Query: "q", Count: 1},
+		}})
+	}
+	var total uint64
+	for _, q := range e.DB {
+		total += q.Count
+	}
+	if total != model.MaxDBQueries+5 || len(e.DB) > model.MaxDBQueries+1 {
+		t.Fatalf("lost data on merge: total %d, %d keys", total, len(e.DB))
+	}
+}

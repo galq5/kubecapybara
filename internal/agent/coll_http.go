@@ -160,6 +160,9 @@ func (c *httpCollector) handleDB(ev *bpf.HttpHttpEvent) {
 		return
 	}
 	query := ParseDBRequest(ev.Proto, cbytes(ev.Req[:]))
+	if query == "" {
+		return // not a request after all (e.g. a Redis server's reply)
+	}
 	failed := DBError(ev.Proto, cbytes(ev.Resp[:]))
 	entity := c.a.resolver.Entity(ev.Cgroup)
 	latUs := ev.LatencyNs / 1000

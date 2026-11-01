@@ -53,6 +53,7 @@ func Rightsize(v *View, price Pricing) []RightsizeRow {
 		cpuSum, cpuPeak, memPeak       float64
 		cpuReq, cpuLim, memReq, memLim int64
 		peakKnown                      bool
+		cpuPods                        int // pods with a CPU measurement
 	}
 	by := map[string]*agg{}
 	for _, e := range v.PodEntities() {
@@ -73,14 +74,24 @@ func Rightsize(v *View, price Pricing) []RightsizeRow {
 		a.memReq += memReq
 		a.memLim += memLim
 
+		// no CPU measurement at all (collector missing): do not pretend 0
+		hasCPU := e.Stats.Sched != nil || (e.Stats.Res != nil && e.Stats.Res.WallUs > 0)
 		avg := v.CoresUsed(e.Stats.Sched) * 1000
 		if r := e.Stats.Res; r != nil && r.WallUs > 0 {
 			avg = float64(r.CPUUsageUs) / float64(r.WallUs) * 1000
 		}
-		a.cpuSum += avg
+		if hasCPU {
+			a.cpuPods++
+			a.cpuSum += avg
+		}
 		peak, mem := avg, 0.0
 		if r := e.Stats.Res; r != nil {
 			mem = math.Max(float64(r.MemPeak), float64(r.MemCurrent))
+			// per-interval peak over the whole window (survives rollups)
+			if r.CPUPeakMilli > peak {
+				peak = r.CPUPeakMilli
+				a.peakKnown = true
+			}
 		}
 		for _, s := range v.Series[e.ID] {
 			if s.CPUMilli > peak {
@@ -99,23 +110,28 @@ func Rightsize(v *View, price Pricing) []RightsizeRow {
 		n := float64(r.Pods)
 		r.CPUReq, r.CPULim = a.cpuReq/int64(r.Pods), a.cpuLim/int64(r.Pods)
 		r.MemReq, r.MemLim = a.memReq/int64(r.Pods), a.memLim/int64(r.Pods)
-		r.CPUAvg, r.CPUPeak, r.MemPeak = a.cpuSum/n, a.cpuPeak, a.memPeak
+		r.CPUPeak, r.MemPeak = a.cpuPeak, a.memPeak
+		if a.cpuPods > 0 {
+			r.CPUAvg = a.cpuSum / float64(a.cpuPods)
+			r.CPURec = int64(math.Max(10, roundUp(r.CPUPeak*1.2, 10)))
+		}
 		r.PeakKnown = a.peakKnown
-		r.CPURec = int64(math.Max(10, roundUp(r.CPUPeak*1.2, 10)))
 		if r.MemPeak > 0 {
 			r.MemRec = int64(math.Max(32<<20, roundUp(r.MemPeak*1.25, 16<<20)))
 		}
 		switch {
+		case a.cpuPods == 0 && r.MemRec == 0:
+			r.Verdict = "no-data"
 		case r.CPUReq == 0 && r.MemReq == 0:
 			r.Verdict = "no-requests"
 		case (r.CPUReq > 0 && r.CPUPeak > float64(r.CPUReq)*1.1) || (r.MemLim > 0 && r.MemPeak > 0.9*float64(r.MemLim)):
 			r.Verdict = "under"
-		case (r.CPUReq > 2*r.CPURec && r.CPUReq-r.CPURec >= 100) || (r.MemRec > 0 && r.MemReq > 2*r.MemRec && r.MemReq-r.MemRec >= 128<<20):
+		case (r.CPURec > 0 && r.CPUReq > 2*r.CPURec && r.CPUReq-r.CPURec >= 100) || (r.MemRec > 0 && r.MemReq > 2*r.MemRec && r.MemReq-r.MemRec >= 128<<20):
 			r.Verdict = "over"
 		default:
 			r.Verdict = "ok"
 		}
-		if r.CPUReq > 0 {
+		if r.CPUReq > 0 && r.CPURec > 0 {
 			r.MonthlyUSD += float64(r.CPUReq-r.CPURec) / 1000 * price.CorePerHour * month * n
 		}
 		if r.MemReq > 0 && r.MemRec > 0 {
@@ -310,40 +326,45 @@ func (m NodeMatrix) Cell(a, b string) model.Hist {
 	return h
 }
 
-// SlowNodes returns nodes whose median cross-node RTT p50 is more than 3x
-// the cluster median (and above 1ms).
+// SlowNodes returns nodes whose links to other nodes are slow while the
+// links between the remaining nodes are not: the (lower) median RTT p50 of
+// the node's links must exceed 3x the median of all links not involving it
+// (and 1ms). Works from 3 nodes up.
 func (m NodeMatrix) SlowNodes() map[string]float64 {
 	if len(m.Nodes) < 3 {
 		return nil
 	}
-	node := map[string]float64{}
-	var all []float64
-	for _, a := range m.Nodes {
-		var vals []float64
-		for _, b := range m.Nodes {
-			if a == b {
-				continue
-			}
+	type link struct {
+		a, b string
+		p50  float64
+	}
+	var links []link
+	for i, a := range m.Nodes {
+		for _, b := range m.Nodes[i+1:] {
 			if h := m.Cell(a, b); h.Count >= 10 {
-				vals = append(vals, h.P50())
+				links = append(links, link{a, b, h.P50()})
 			}
 		}
-		if len(vals) == 0 {
+	}
+	lowerMedian := func(v []float64) float64 {
+		sort.Float64s(v)
+		return v[(len(v)-1)/2]
+	}
+	out := map[string]float64{}
+	for _, n := range m.Nodes {
+		var own, others []float64
+		for _, l := range links {
+			if l.a == n || l.b == n {
+				own = append(own, l.p50)
+			} else {
+				others = append(others, l.p50)
+			}
+		}
+		if len(own) == 0 || len(others) == 0 {
 			continue
 		}
-		sort.Float64s(vals)
-		node[a] = vals[len(vals)/2]
-		all = append(all, node[a])
-	}
-	if len(all) < 3 {
-		return nil
-	}
-	sort.Float64s(all)
-	med := all[len(all)/2]
-	out := map[string]float64{}
-	for n, v := range node {
-		if v > 3*med && v > 1000 {
-			out[n] = v
+		if o, rest := lowerMedian(own), lowerMedian(others); o > 3*rest && o > 1000 {
+			out[n] = o
 		}
 	}
 	return out
@@ -368,6 +389,9 @@ type ServiceBalance struct {
 	ByBytes   bool
 	Imbalance float64 // busiest share / fair share
 }
+
+// minBalanceBytes is the traffic needed to judge byte-based balance.
+const minBalanceBytes = 1 << 20
 
 // ServiceBalances measures the distribution of server-side traffic over
 // the ready backends of each Service with at least two backends.
@@ -409,6 +433,9 @@ func ServiceBalances(v *View) []ServiceBalance {
 		sb.Total = conns
 		if conns < 20 {
 			sb.ByBytes, sb.Total = true, bytes
+			if bytes < minBalanceBytes {
+				continue // too little traffic to judge
+			}
 		}
 		if sb.Total == 0 {
 			continue

@@ -153,6 +153,14 @@ func (c *cgroupfsCollector) Collect(w *Window) {
 		}
 		c.prev[entity] = cur
 
+		sample := model.ResourceSample{Time: now, MemCurrent: mem, MemMax: memMax}
+		if res.WallUs > 0 {
+			sample.CPUMilli = float64(res.CPUUsageUs) / float64(res.WallUs) * 1000
+			res.CPUPeakMilli = sample.CPUMilli
+		}
+		if res.Periods > 0 {
+			sample.ThrottledPct = float64(res.Throttled) / float64(res.Periods) * 100
+		}
 		e := w.Entity(entity)
 		e.PodUID = uid
 		if e.Res == nil {
@@ -160,13 +168,6 @@ func (c *cgroupfsCollector) Collect(w *Window) {
 		}
 		e.Res.Merge(res)
 
-		sample := model.ResourceSample{Time: now, MemCurrent: mem, MemMax: memMax}
-		if res.WallUs > 0 {
-			sample.CPUMilli = float64(res.CPUUsageUs) / float64(res.WallUs) * 1000
-		}
-		if res.Periods > 0 {
-			sample.ThrottledPct = float64(res.Throttled) / float64(res.Periods) * 100
-		}
 		c.a.rec.Sample(entity, sample)
 	}
 	for k := range c.prev {

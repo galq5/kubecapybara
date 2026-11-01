@@ -169,6 +169,14 @@ func (o *options) init() error {
 					failed bool
 					cached *k8smeta.Meta
 				)
+				ds.EventsFn = func(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error) {
+					if failed {
+						return nil, nil
+					}
+					c, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+					return k8smeta.LoadPodEvents(c, cs, ns, uid)
+				}
 				ds.MetaFn = func(ctx context.Context) (*k8smeta.Meta, error) {
 					if failed {
 						return nil, nil

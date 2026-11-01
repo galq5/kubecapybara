@@ -203,3 +203,22 @@ func TestDBParsing(t *testing.T) {
 		t.Error("mysql error detection")
 	}
 }
+
+func TestDBParsingEdgeCases(t *testing.T) {
+	// a Redis server's array reply is not a client command
+	if q := ParseDBRequest(protoRedis, []byte("*3\r\n$5\r\njob-1\r\n$5\r\njob-2\r\n")); q != "" {
+		t.Errorf("server reply parsed as command %q", q)
+	}
+	if q := ParseDBRequest(protoRedis, []byte("*2\r\n$7\r\nmessage\r\n$4\r\nchan\r\n")); q != "" {
+		t.Errorf("pub/sub push parsed as command %q", q)
+	}
+	// extended protocol: ParseComplete, BindComplete, then ErrorResponse
+	reply := []byte{'1', 0, 0, 0, 4, '2', 0, 0, 0, 4, 'E', 0, 0, 0, 0x40, 'S'}
+	if !DBError(protoPostgres, reply) {
+		t.Error("error after ParseComplete/BindComplete missed")
+	}
+	ok := []byte{'1', 0, 0, 0, 4, '2', 0, 0, 0, 4, 'C', 0, 0, 0, 0x0d, 'I'}
+	if DBError(protoPostgres, ok) {
+		t.Error("CommandComplete reported as error")
+	}
+}

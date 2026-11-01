@@ -47,7 +47,8 @@ func cstring(b []byte) string {
 }
 
 // ParseDBRequest extracts a normalized statement (or command) from the first
-// bytes of a client request.
+// bytes of a client request. It returns "" when the bytes are not a request
+// after all (the event must then be ignored).
 func ParseDBRequest(proto uint8, b []byte) string {
 	switch proto {
 	case protoPostgres:
@@ -75,14 +76,40 @@ func ParseDBRequest(proto uint8, b []byte) string {
 	return "(unknown)"
 }
 
+// redisCommands are the commands accepted as client requests. A Redis
+// server's array replies (LRANGE results, pub/sub messages) have the same
+// RESP shape as requests; requiring a known command name filters them out.
+var redisCommands = map[string]bool{}
+
+func init() {
+	for _, c := range strings.Fields(`APPEND AUTH BITCOUNT BITFIELD BITOP BITPOS BLMOVE BLPOP BRPOP BRPOPLPUSH BZPOPMAX BZPOPMIN
+	CLIENT CLUSTER COMMAND CONFIG COPY DBSIZE DECR DECRBY DEL DISCARD DUMP ECHO EVAL EVALSHA EXEC EXISTS EXPIRE EXPIREAT
+	FLUSHALL FLUSHDB GEOADD GEODIST GEOHASH GEOPOS GEOSEARCH GET GETDEL GETEX GETRANGE GETSET HDEL HELLO HEXISTS HGET
+	HGETALL HINCRBY HINCRBYFLOAT HKEYS HLEN HMGET HMSET HSCAN HSET HSETNX HSTRLEN HVALS INCR INCRBY INCRBYFLOAT INFO KEYS
+	LINDEX LINSERT LLEN LMOVE LPOP LPOS LPUSH LPUSHX LRANGE LREM LSET LTRIM MGET MONITOR MOVE MSET MSETNX MULTI OBJECT
+	PERSIST PEXPIRE PEXPIREAT PFADD PFCOUNT PFMERGE PING PSETEX PSUBSCRIBE PTTL PUBLISH PUBSUB PUNSUBSCRIBE RANDOMKEY
+	READONLY RENAME RENAMENX RESTORE ROLE RPOP RPOPLPUSH RPUSH RPUSHX SADD SCAN SCARD SCRIPT SDIFF SDIFFSTORE SELECT SET
+	SETEX SETNX SETRANGE SINTER SINTERSTORE SISMEMBER SMEMBERS SMISMEMBER SMOVE SORT SPOP SRANDMEMBER SREM SSCAN STRLEN
+	SUBSCRIBE SUNION SUNIONSTORE SWAPDB TIME TOUCH TTL TYPE UNLINK UNSUBSCRIBE UNWATCH WAIT WATCH XACK XADD XAUTOCLAIM
+	XCLAIM XDEL XGROUP XINFO XLEN XPENDING XRANGE XREAD XREADGROUP XREVRANGE XTRIM ZADD ZCARD ZCOUNT ZINCRBY ZINTERSTORE
+	ZLEXCOUNT ZMSCORE ZPOPMAX ZPOPMIN ZRANDMEMBER ZRANGE ZRANGEBYLEX ZRANGEBYSCORE ZRANK ZREM ZREMRANGEBYLEX
+	ZREMRANGEBYRANK ZREMRANGEBYSCORE ZREVRANGE ZREVRANGEBYLEX ZREVRANGEBYSCORE ZREVRANK ZSCAN ZSCORE ZUNIONSTORE`) {
+		redisCommands[c] = true
+	}
+}
+
 // redisCommand returns the command name (and subcommand for a few) of a RESP
-// array request: "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n" -> "GET".
+// array request: "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n" -> "GET". It returns ""
+// when the first element is not a known command (e.g. a server reply).
 func redisCommand(b []byte) string {
 	parts := strings.Split(string(b), "\r\n")
 	if len(parts) < 3 || !strings.HasPrefix(parts[1], "$") {
-		return "(unknown)"
+		return ""
 	}
 	cmd := strings.ToUpper(parts[2])
+	if !redisCommands[cmd] {
+		return ""
+	}
 	switch cmd {
 	case "CLIENT", "CONFIG", "CLUSTER", "XGROUP", "SCRIPT", "OBJECT":
 		if len(parts) >= 5 {
@@ -102,7 +129,19 @@ func DBError(proto uint8, resp []byte) bool {
 	}
 	switch proto {
 	case protoPostgres:
-		return resp[0] == 'E'
+		// walk the messages: with the extended protocol an ErrorResponse
+		// comes after ParseComplete ('1') / BindComplete ('2')
+		for i := 0; i+5 <= len(resp); {
+			if resp[i] == 'E' {
+				return true
+			}
+			n := int(resp[i+1])<<24 | int(resp[i+2])<<16 | int(resp[i+3])<<8 | int(resp[i+4])
+			if n < 4 {
+				return false
+			}
+			i += 1 + n
+		}
+		return len(resp) > 0 && resp[0] == 'E'
 	case protoRedis:
 		return resp[0] == '-'
 	case protoMySQL:

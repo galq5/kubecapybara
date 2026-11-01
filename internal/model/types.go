@@ -275,10 +275,16 @@ func (e *EntityStats) Merge(o *EntityStats) {
 		cur, ok := e.DB[k]
 		if !ok {
 			if len(e.DB) >= MaxDBQueries {
-				continue
+				k = v.Proto + "|(other)"
+				cur = e.DB[k]
 			}
-			cur = &DBQuery{Proto: v.Proto, Query: v.Query}
-			e.DB[k] = cur
+			if cur == nil {
+				cur = &DBQuery{Proto: v.Proto, Query: v.Query}
+				if len(e.DB) >= MaxDBQueries {
+					cur.Query = "(other)"
+				}
+				e.DB[k] = cur
+			}
 		}
 		cur.Merge(v)
 	}
@@ -289,10 +295,16 @@ func (e *EntityStats) Merge(o *EntityStats) {
 		cur, ok := e.Files[k]
 		if !ok {
 			if len(e.Files) >= MaxFiles {
-				continue
+				k = "(other files)"
+				cur = e.Files[k]
 			}
-			cur = &FileStats{Path: v.Path}
-			e.Files[k] = cur
+			if cur == nil {
+				cur = &FileStats{Path: v.Path}
+				if len(e.Files) >= MaxFiles {
+					cur.Path = k
+				}
+				e.Files[k] = cur
+			}
 		}
 		cur.Merge(v)
 	}
@@ -376,6 +388,9 @@ type Resources struct {
 	OOMKills    uint64 `json:"oomKills,omitempty"`
 	WallUs      uint64 `json:"wallUs,omitempty"` // sampling wall time covered by the counters
 	MemPeak     uint64 `json:"memPeak,omitempty"`
+	// CPUPeakMilli is the highest CPU usage of any collection interval in
+	// the range (max-merged, so minute rollups keep it for hours).
+	CPUPeakMilli float64 `json:"cpuPeakMilli,omitempty"`
 }
 
 // Merge adds o into r (gauges take the latest sample).
@@ -388,6 +403,9 @@ func (r *Resources) Merge(o *Resources) {
 		r.PSIMem = o.PSIMem
 		r.PSIIO = o.PSIIO
 		r.SampledAt = o.SampledAt
+	}
+	if o.CPUPeakMilli > r.CPUPeakMilli {
+		r.CPUPeakMilli = o.CPUPeakMilli
 	}
 	if o.MemPeak > r.MemPeak {
 		r.MemPeak = o.MemPeak

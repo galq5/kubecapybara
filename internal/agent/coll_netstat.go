@@ -118,8 +118,11 @@ func (c *netstatCollector) Collect(w *Window) {
 		}
 		e.Net.Merge(ns2)
 	}
+	// keep baselines while the pod exists (it may have no process for a
+	// moment, e.g. during a container restart)
+	pods := c.a.resolver.Pods()
 	for k := range c.prev {
-		if !seen[k] {
+		if _, ok := pods[strings.TrimPrefix(k, "pod:")]; !ok && !seen[k] {
 			delete(c.prev, k)
 		}
 	}

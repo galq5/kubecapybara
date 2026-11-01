@@ -92,6 +92,8 @@ func Rightsize(w io.Writer, st Style, v *analysis.View, f Filter, price analysis
 			verdict = st.Crit("under-provisioned")
 		case "no-requests":
 			verdict = st.Dim("no requests set")
+		case "no-data":
+			verdict = st.Dim("no CPU/memory data")
 		default:
 			verdict = st.OK("ok")
 		}

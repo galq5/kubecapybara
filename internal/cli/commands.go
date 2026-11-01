@@ -501,6 +501,10 @@ func (o *options) cmdRightsize() *cobra.Command {
 		Short:   "Compare measured CPU/memory with requests and limits: recommendations and savings",
 		Long:    "Use a long window (e.g. -w 6h): recommendations are based on the peak observed in the window.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// sizing from one minute of data is meaningless: default to 6h
+			if f := cmd.Flag("window"); f == nil || !f.Changed {
+				o.window = 6 * time.Hour
+			}
 			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.Rightsize(r.View, price) }, func(st render.Style, r *tui.Result) error {
 				render.Header(os.Stdout, st, r.View, o.src.Describe())
 				render.Rightsize(os.Stdout, st, r.View, o.filt(), price)
@@ -533,7 +537,7 @@ func (o *options) cmdOOM() *cobra.Command {
 		Use:   "oom",
 		Short: "Pods trending towards their memory limit, with time to OOM",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if o.window < 5*time.Minute {
+			if f := cmd.Flag("window"); f == nil || !f.Changed {
 				o.window = 10 * time.Minute
 			}
 			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.OOMRisks(r.View) }, func(st render.Style, r *tui.Result) error {

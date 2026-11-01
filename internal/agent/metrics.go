@@ -140,6 +140,23 @@ func (m *metrics) observe(w *Window) {
 		for errno, n := range e.ConnErrors {
 			m.counter("capybara_connect_errors_total", "connect() failures by errno.", entityLabels(id, "errno", errno), float64(n), now)
 		}
+		for _, q := range e.DB {
+			ql := entityLabels(id, "db", q.Proto, "statement", q.Query)
+			m.counter("capybara_db_requests_total", "Client database requests (plaintext Postgres/MySQL/Redis).", ql, float64(q.Count), now)
+			m.counter("capybara_db_errors_total", "Client database requests answered with an error.", ql, float64(q.Errors), now)
+			m.histogram("capybara_db_latency_seconds", "Client database request latency.", ql, q.Lat, now)
+		}
+		for _, f := range e.Files {
+			fl := entityLabels(id, "path", f.Path, "fs", f.FSType)
+			m.counter("capybara_slow_file_ops_total", "File operations slower than the agent threshold.", fl, float64(f.Ops()), now)
+			m.counter("capybara_slow_file_wait_seconds_total", "Time spent in slow file operations.", fl, float64(f.WaitNs)/1e9, now)
+		}
+		if n := e.Net; n != nil {
+			m.counter("capybara_tcp_listen_overflows_total", "Accept queue overflows in the pod network namespace.", el, float64(n.ListenOverflows), now)
+			m.counter("capybara_tcp_listen_drops_total", "SYNs dropped by listeners in the pod network namespace.", el, float64(n.ListenDrops), now)
+			m.counter("capybara_tcp_zero_window_drops_total", "Packets dropped because the receive window was closed.", el, float64(n.ZeroWindowDrops), now)
+			m.counter("capybara_tcp_rcvq_drops_total", "Packets dropped because the receive queue was full.", el, float64(n.RcvQueueDrops), now)
+		}
 		if r := e.Res; r != nil {
 			m.gauge("capybara_memory_bytes", "Pod memory.current.", el, float64(r.MemCurrent), now)
 			m.counter("capybara_cpu_throttled_periods_total", "CFS periods throttled.", el, float64(r.Throttled), now)
@@ -155,6 +172,7 @@ func (m *metrics) observe(w *Window) {
 		m.counter("capybara_tcp_retransmits_total", "TCP segment retransmissions.", pl, float64(p.Retrans), now)
 		m.counter("capybara_tcp_tx_bytes_total", "TCP bytes sent by the local socket.", pl, float64(p.BytesTx), now)
 		m.counter("capybara_tcp_rx_bytes_total", "TCP bytes received by the local socket.", pl, float64(p.BytesRx), now)
+		m.counter("capybara_tcp_zero_window_seconds_total", "Approximate time the peer's receive window was closed.", pl, float64(p.ZeroWindow)/10, now)
 	}
 	for _, d := range w.Drops {
 		m.counter("capybara_packet_drops_total", "Dropped packets by kernel drop reason.", labels("reason", d.Reason, "proto", d.Proto), float64(d.Count), now)
