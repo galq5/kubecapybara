@@ -110,7 +110,7 @@ Run without arguments for the interactive dashboard.`,
 		o.cmdEvents(), o.cmdRollout(), o.cmdStartup(), o.cmdWhyCrash(), o.cmdSecurity(), o.cmdCost(),
 		o.cmdNetpol(), o.cmdProfile(), o.cmdSnapshot(), o.cmdVersion(version),
 		o.cmdRightsize(), o.cmdServices(), o.cmdOOM(), o.cmdDB(), o.cmdFiles(),
-		o.cmdOutliers(), o.cmdSLO(), o.cmdPools(),
+		o.cmdOutliers(), o.cmdSLO(), o.cmdPools(), o.cmdIncident(), o.cmdProfileDiff(),
 	)
 	return root
 }
@@ -180,6 +180,13 @@ func (o *options) init() error {
 					failed bool
 					cached *k8smeta.Meta
 				)
+				ds.ChangesFn = func(ctx context.Context, since time.Time) ([]k8smeta.Change, error) {
+					if failed {
+						return nil, nil
+					}
+					m, _ := ds.MetaFn(ctx)
+					return k8smeta.LoadChanges(ctx, cs, m, since)
+				}
 				ds.EventsFn = func(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error) {
 					if failed {
 						return nil, nil

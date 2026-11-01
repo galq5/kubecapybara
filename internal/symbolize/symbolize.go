@@ -23,9 +23,10 @@ type Symbolizer struct {
 	kOnce sync.Once
 	ksyms []sym
 
-	mu   sync.Mutex
-	elfs map[string]*elfInfo
-	maps map[uint32][]mapping
+	mu       sync.Mutex
+	elfs     map[string]*elfInfo
+	maps     map[uint32][]mapping
+	perfMaps map[uint32][]sym // JIT symbols (JVM perf maps, node --perf-basic-prof)
 }
 
 type sym struct {
@@ -48,7 +49,7 @@ type elfInfo struct {
 
 // New creates a symbolizer reading from procRoot (usually /proc).
 func New(procRoot string) *Symbolizer {
-	return &Symbolizer{procRoot: procRoot, elfs: map[string]*elfInfo{}, maps: map[uint32][]mapping{}}
+	return &Symbolizer{procRoot: procRoot, elfs: map[string]*elfInfo{}, maps: map[uint32][]mapping{}, perfMaps: map[uint32][]sym{}}
 }
 
 // Kernel resolves a kernel address.
@@ -91,7 +92,70 @@ func (s *Symbolizer) loadKallsyms() {
 func (s *Symbolizer) Forget() {
 	s.mu.Lock()
 	s.maps = map[uint32][]mapping{}
+	s.perfMaps = map[uint32][]sym{}
 	s.mu.Unlock()
+}
+
+// nsPid returns the pid of a process inside its own pid namespace.
+func (s *Symbolizer) nsPid(pid uint32) string {
+	b, err := os.ReadFile(filepath.Join(s.procRoot, strconv.Itoa(int(pid)), "status"))
+	if err != nil {
+		return strconv.Itoa(int(pid))
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "NSpid:"); ok {
+			if f := strings.Fields(v); len(f) > 0 {
+				return f[len(f)-1]
+			}
+		}
+	}
+	return strconv.Itoa(int(pid))
+}
+
+// perfMap loads /tmp/perf-<pid>.map as seen inside the process' mount
+// namespace: "START SIZE name" lines written by JIT runtimes (JVM with
+// -XX:+UnlockDiagnosticVMOptions -XX:+DumpPerfMapAtExit or perf-map-agent,
+// node --perf-basic-prof, .NET DOTNET_PerfMapEnabled=1).
+func (s *Symbolizer) perfMap(pid uint32) []sym {
+	s.mu.Lock()
+	m, ok := s.perfMaps[pid]
+	s.mu.Unlock()
+	if ok {
+		return m
+	}
+	path := filepath.Join(s.procRoot, strconv.Itoa(int(pid)), "root", "tmp", "perf-"+s.nsPid(pid)+".map")
+	if f, err := os.Open(path); err == nil {
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64*1024), 1024*1024)
+		for sc.Scan() {
+			parts := strings.SplitN(sc.Text(), " ", 3)
+			if len(parts) != 3 {
+				continue
+			}
+			start, err1 := strconv.ParseUint(parts[0], 16, 64)
+			size, err2 := strconv.ParseUint(parts[1], 16, 64)
+			if err1 != nil || err2 != nil {
+				continue
+			}
+			m = append(m, sym{start, parts[2]}, sym{start + size, ""})
+		}
+		f.Close()
+		sort.SliceStable(m, func(i, j int) bool { return m[i].addr < m[j].addr })
+	}
+	s.mu.Lock()
+	s.perfMaps[pid] = m
+	s.mu.Unlock()
+	return m
+}
+
+// jit resolves an address in JIT compiled code ("" if unknown).
+func (s *Symbolizer) jit(pid uint32, addr uint64) string {
+	m := s.perfMap(pid)
+	i := sort.Search(len(m), func(i int) bool { return m[i].addr > addr }) - 1
+	if i >= 0 && m[i].name != "" {
+		return m[i].name
+	}
+	return ""
 }
 
 func (s *Symbolizer) procMaps(pid uint32) []mapping {
@@ -131,6 +195,9 @@ func (s *Symbolizer) User(pid uint32, addr uint64) string {
 		}
 		base := filepath.Base(m.path)
 		if strings.HasPrefix(m.path, "[") {
+			if name := s.jit(pid, addr); name != "" {
+				return name
+			}
 			return m.path
 		}
 		// open through the process root so container files resolve
@@ -155,6 +222,10 @@ func (s *Symbolizer) User(pid uint32, addr uint64) string {
 			return name
 		}
 		return fmt.Sprintf("%s+%#x", base, fileOff)
+	}
+	// anonymous executable memory: JIT compiled code
+	if name := s.jit(pid, addr); name != "" {
+		return name
 	}
 	return fmt.Sprintf("[unknown] %#x", addr)
 }

@@ -110,10 +110,11 @@ type ServicePort struct {
 
 // Node is the subset of a node we need.
 type Node struct {
-	Name   string   `json:"name"`
-	IPs    []string `json:"ips"`
-	Zone   string   `json:"zone,omitempty"`
-	Region string   `json:"region,omitempty"`
+	Name    string    `json:"name"`
+	IPs     []string  `json:"ips"`
+	Zone    string    `json:"zone,omitempty"`
+	Region  string    `json:"region,omitempty"`
+	Created time.Time `json:"created,omitempty"`
 }
 
 // ReplicaSet links pods to deployments.
@@ -151,9 +152,10 @@ func Load(ctx context.Context, cs kubernetes.Interface, clusterDomain string) (*
 	for i := range nodes.Items {
 		n := &nodes.Items[i]
 		node := &Node{
-			Name:   n.Name,
-			Zone:   firstLabel(n.Labels, "topology.kubernetes.io/zone", "failure-domain.beta.kubernetes.io/zone"),
-			Region: firstLabel(n.Labels, "topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"),
+			Name:    n.Name,
+			Zone:    firstLabel(n.Labels, "topology.kubernetes.io/zone", "failure-domain.beta.kubernetes.io/zone"),
+			Region:  firstLabel(n.Labels, "topology.kubernetes.io/region", "failure-domain.beta.kubernetes.io/region"),
+			Created: n.CreationTimestamp.Time,
 		}
 		for _, a := range n.Status.Addresses {
 			if a.Type == corev1.NodeInternalIP || a.Type == corev1.NodeExternalIP {
@@ -573,3 +575,82 @@ func matches(sel, labels map[string]string) bool {
 
 // Matches reports whether labels satisfy a selector.
 func Matches(sel, labels map[string]string) bool { return matches(sel, labels) }
+
+// Change is something that changed in the cluster (for incident timelines).
+type Change struct {
+	Time      time.Time `json:"time"`
+	Kind      string    `json:"kind"` // rollout, scale, config, node, eviction, restart, scheduling, probe...
+	Namespace string    `json:"namespace,omitempty"`
+	Name      string    `json:"name"`
+	Text      string    `json:"text"`
+	Warning   bool      `json:"warning,omitempty"`
+}
+
+var changeReasons = map[string]string{
+	"ScalingReplicaSet": "scale", "SuccessfulRescale": "autoscale", "Killing": "kill", "Evicted": "eviction",
+	"BackOff": "restart", "Unhealthy": "probe", "FailedScheduling": "scheduling", "NodeNotReady": "node",
+	"NodeReady": "node", "RegisteredNode": "node", "RemovingNode": "node", "Preempting": "eviction",
+	"OOMKilling": "oom", "FailedCreatePodSandBox": "sandbox", "FailedMount": "volume", "Rebooted": "node",
+	"NodeHasDiskPressure": "node", "NodeHasMemoryPressure": "node", "EvictionThresholdMet": "node",
+}
+
+// LoadChanges returns cluster changes since a time: interesting events,
+// ConfigMap updates, new ReplicaSets (rollouts) and new nodes. Older
+// changes than the API server's event retention (1h by default) are lost.
+func LoadChanges(ctx context.Context, cs kubernetes.Interface, m *Meta, since time.Time) ([]Change, error) {
+	var out []Change
+	evs, err := cs.CoreV1().Events("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("list events: %w", err)
+	}
+	for _, e := range evs.Items {
+		kind, ok := changeReasons[e.Reason]
+		if !ok {
+			continue
+		}
+		t := e.LastTimestamp.Time
+		if t.IsZero() {
+			t = e.EventTime.Time
+		}
+		if t.IsZero() {
+			t = e.CreationTimestamp.Time
+		}
+		if t.Before(since) {
+			continue
+		}
+		text := e.Reason + ": " + e.Message
+		if e.Count > 1 {
+			text += fmt.Sprintf(" (×%d)", e.Count)
+		}
+		out = append(out, Change{Time: t, Kind: kind, Namespace: e.InvolvedObject.Namespace, Name: e.InvolvedObject.Kind + "/" + e.InvolvedObject.Name,
+			Text: text, Warning: e.Type == "Warning"})
+	}
+	if cms, err := cs.CoreV1().ConfigMaps("").List(ctx, metav1.ListOptions{}); err == nil {
+		for _, c := range cms.Items {
+			var last time.Time
+			for _, mf := range c.ManagedFields {
+				if mf.Time != nil && mf.Time.After(last) {
+					last = mf.Time.Time
+				}
+			}
+			if !last.Before(since) && last.After(c.CreationTimestamp.Time) {
+				out = append(out, Change{Time: last, Kind: "config", Namespace: c.Namespace, Name: "ConfigMap/" + c.Name, Text: "ConfigMap " + c.Namespace + "/" + c.Name + " updated"})
+			}
+		}
+	}
+	if m != nil {
+		for _, rs := range m.ReplicaSets {
+			if !rs.Created.Before(since) && rs.Deployment != "" {
+				out = append(out, Change{Time: rs.Created, Kind: "rollout", Namespace: rs.Namespace, Name: "Deployment/" + rs.Deployment,
+					Text: fmt.Sprintf("rollout of deployment %s/%s (revision %s)", rs.Namespace, rs.Deployment, rs.Revision)})
+			}
+		}
+		for _, n := range m.Nodes {
+			if !n.Created.IsZero() && !n.Created.Before(since) {
+				out = append(out, Change{Time: n.Created, Kind: "node", Name: "Node/" + n.Name, Text: "node " + n.Name + " joined the cluster"})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Time.Before(out[j].Time) })
+	return out, nil
+}

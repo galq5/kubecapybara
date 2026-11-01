@@ -496,3 +496,47 @@ func Pools(w io.Writer, st Style, v *analysis.View, base *analysis.View, f Filte
 	t.Render(w, st)
 	fmt.Fprintln(w, st.Dim("idle = no data received for 30s; open/idle are the highest values in the window"))
 }
+
+// Incident prints an incident timeline.
+func Incident(w io.Writer, st Style, items []analysis.TimelineItem) {
+	if len(items) == 0 {
+		fmt.Fprintln(w, st.Dim("nothing happened in this range"))
+		return
+	}
+	for _, it := range items {
+		kind := st.Dim(fmt.Sprintf("%-6s", it.Kind))
+		text := it.Text
+		switch it.Severity {
+		case model.SevCrit:
+			text = st.Crit(text)
+		case model.SevWarn:
+			text = st.Warn(text)
+		}
+		fmt.Fprintf(w, "%s %s %-40s %s\n", it.Time.Format("15:04:05"), kind, truncate(it.Subject, 40), text)
+		if it.Cause != "" {
+			fmt.Fprintf(w, "%s %s %s\n", strings.Repeat(" ", 15), st.Accent("↳ likely cause,"), it.Cause)
+		}
+	}
+}
+
+// ProfileDiff prints the functions whose CPU share changed the most.
+func ProfileDiff(w io.Writer, st Style, before, now *model.Profile, beforeName, nowName string, n int) {
+	fmt.Fprintf(w, "%s %s (%d samples)  →  %s (%d samples)\n\n", st.Title("profile diff"), beforeName, before.Samples, nowName, now.Samples)
+	t := &Table{Headers: []string{"SELF BEFORE", "SELF NOW", "CHANGE", "TOTAL BEFORE", "TOTAL NOW", "FUNCTION"},
+		Right: map[int]bool{0: true, 1: true, 2: true, 3: true, 4: true}, MaxCol: 90}
+	for i, d := range analysis.ProfileDiff(before, now) {
+		if i >= n {
+			break
+		}
+		change := fmt.Sprintf("%+.1f pp", 100*(d.Now-d.Before))
+		switch {
+		case d.Now-d.Before > 0.02:
+			change = st.Crit(change)
+		case d.Now-d.Before < -0.02:
+			change = st.OK(change)
+		}
+		t.AddRow(analysis.Pct(d.Before), analysis.Pct(d.Now), change, analysis.Pct(d.TotalBefore), analysis.Pct(d.TotalNow), d.Name)
+	}
+	t.Render(w, st)
+	fmt.Fprintln(w, st.Dim("shares of CPU samples; pp = percentage points. Java/Node frames need a perf map (/tmp/perf-<pid>.map) to show method names"))
+}

@@ -40,6 +40,8 @@ type Source interface {
 	Meta(ctx context.Context) (*k8smeta.Meta, error)
 	// PodEvents returns Kubernetes events of a pod (nil when unavailable).
 	PodEvents(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error)
+	// Changes returns cluster changes since a time (nil when unavailable).
+	Changes(ctx context.Context, since time.Time) ([]k8smeta.Change, error)
 	// Describe returns a short description for status lines.
 	Describe() string
 }
@@ -212,6 +214,11 @@ func (k *KubeSource) Profile(ctx context.Context, node, entity string, seconds, 
 	return nil, fmt.Errorf("no agent running on node %s", node)
 }
 
+func (k *KubeSource) Changes(ctx context.Context, since time.Time) ([]k8smeta.Change, error) {
+	m, _ := k.Meta(ctx)
+	return k8smeta.LoadChanges(ctx, k.CS, m, since)
+}
+
 func (k *KubeSource) PodEvents(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error) {
 	return k8smeta.LoadPodEvents(ctx, k.CS, ns, uid)
 }
@@ -239,9 +246,11 @@ func (k *KubeSource) Meta(ctx context.Context) (*k8smeta.Meta, error) {
 type DirectSource struct {
 	// EventsFn optionally lists pod events (e.g. with a kube client).
 	EventsFn func(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error)
-	URLs     []string
-	Token    string // agent API token, if the agents require one
-	Client   *http.Client
+	// ChangesFn optionally lists cluster changes.
+	ChangesFn func(ctx context.Context, since time.Time) ([]k8smeta.Change, error)
+	URLs      []string
+	Token     string // agent API token, if the agents require one
+	Client    *http.Client
 	// MetaSource optionally provides metadata (e.g. a kube client).
 	MetaFn func(ctx context.Context) (*k8smeta.Meta, error)
 }
@@ -348,6 +357,13 @@ func (d *DirectSource) Profile(ctx context.Context, node, entity string, seconds
 	return nil, lastErr
 }
 
+func (d *DirectSource) Changes(ctx context.Context, since time.Time) ([]k8smeta.Change, error) {
+	if d.ChangesFn != nil {
+		return d.ChangesFn(ctx, since)
+	}
+	return nil, nil
+}
+
 func (d *DirectSource) PodEvents(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error) {
 	if d.EventsFn != nil {
 		return d.EventsFn(ctx, ns, uid)
@@ -406,6 +422,8 @@ func (f *FileSource) Profile(context.Context, string, string, int, int) (*model.
 }
 
 func (f *FileSource) Meta(context.Context) (*k8smeta.Meta, error) { return f.bundle.Meta, nil }
+
+func (f *FileSource) Changes(context.Context, time.Time) ([]k8smeta.Change, error) { return nil, nil }
 
 func (f *FileSource) PodEvents(context.Context, string, string) ([]k8smeta.PodEvent, error) {
 	return nil, nil

@@ -2,15 +2,18 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/galq5/kubecapybara/internal/analysis"
 	"github.com/galq5/kubecapybara/internal/client"
+	"github.com/galq5/kubecapybara/internal/model"
 	"github.com/galq5/kubecapybara/internal/render"
 	"github.com/galq5/kubecapybara/internal/tui"
 )
@@ -648,4 +651,175 @@ func (o *options) cmdPools() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func (o *options) cmdIncident() *cobra.Command {
+	var (
+		since time.Duration
+		steps int
+	)
+	c := &cobra.Command{
+		Use:   "incident",
+		Short: "Timeline of what changed and what broke: rollouts, scaling, evictions, crashes, metric jumps with likely causes",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			if steps < 3 {
+				steps = 3
+			}
+			to := time.Now()
+			from := to.Add(-since)
+			o.window = since
+			whole, err := o.load(ctx, false)
+			if err != nil {
+				return err
+			}
+			o.warn(whole)
+			meta := whole.View.Meta
+			step := since / time.Duration(steps)
+			views := make([]*analysis.View, steps)
+			errs := make([]error, steps)
+			var wg sync.WaitGroup
+			sem := make(chan struct{}, 4)
+			for i := 0; i < steps; i++ {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+					f := from.Add(time.Duration(i) * step)
+					snaps, es := o.src.Snapshots(ctx, f, f.Add(step), true)
+					if len(snaps) == 0 {
+						if len(es) > 0 {
+							errs[i] = es[0]
+						}
+						return
+					}
+					v := analysis.Build(snaps, meta, o.aopts())
+					v.From, v.To = f, f.Add(step)
+					views[i] = v
+				}(i)
+			}
+			wg.Wait()
+			var vs []*analysis.View
+			for i, v := range views {
+				if v != nil {
+					vs = append(vs, v)
+				} else if errs[i] != nil {
+					fmt.Fprintln(os.Stderr, "warning:", errs[i])
+				}
+			}
+			changes, err := o.src.Changes(ctx, from)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "warning: cluster changes unavailable:", err)
+			}
+			items := analysis.Incident(vs, whole.View, changes)
+			if o.output == "json" {
+				return o.jsonOut(os.Stdout, items)
+			}
+			st := o.style()
+			fmt.Printf("%s %s → %s (%d steps of %s)\n\n", st.Title("incident timeline"), from.Format("15:04:05"), to.Format("15:04:05"), len(vs), step.Round(time.Second))
+			render.Incident(os.Stdout, st, items)
+			return nil
+		},
+	}
+	c.Flags().DurationVar(&since, "since", 30*time.Minute, "how far back to look (agents keep 6h; Kubernetes events usually 1h)")
+	c.Flags().IntVar(&steps, "steps", 15, "number of time buckets used to detect metric changes")
+	return c
+}
+
+func (o *options) cmdProfileDiff() *cobra.Command {
+	var (
+		dur  time.Duration
+		hz   int
+		pods []string
+		n    int
+	)
+	c := &cobra.Command{
+		Use:   "profile-diff [deployment]",
+		Short: "Compare CPU profiles of the new and the previous revision of a deployment (or two pods with --pods a,b)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			res, err := o.load(ctx, false)
+			if err != nil {
+				return err
+			}
+			v := res.View
+			type target struct {
+				id, node, name string
+			}
+			var a, b target
+			switch {
+			case len(pods) == 2:
+				for i, q := range pods {
+					id, pod, err := o.resolvePod(v, q)
+					if err != nil {
+						return err
+					}
+					t := target{id: id, name: q}
+					if pod != nil {
+						t.node, t.name = pod.Node, pod.Namespace+"/"+pod.Name
+					}
+					if i == 0 {
+						a = t
+					} else {
+						b = t
+					}
+				}
+			case len(args) == 1:
+				ns, name := splitNS(o.namespace, args[0])
+				wl, err := parseWorkload(name)
+				if err != nil {
+					return err
+				}
+				_, dname, _ := strings.Cut(wl, "/")
+				if ns == "" {
+					ns = guessNamespace(v, dname)
+				}
+				rep, err := analysis.Rollout(v, ns, dname)
+				if err != nil {
+					return err
+				}
+				if len(rep.Groups) < 2 {
+					return fmt.Errorf("deployment %s/%s runs a single revision: use --pods a,b to compare two pods", ns, dname)
+				}
+				pick := func(g *analysis.RolloutGroup) target {
+					p := g.Pods[0]
+					return target{id: "pod:" + p.UID, node: p.Node, name: fmt.Sprintf("%s (rev %s)", p.Name, g.Revision)}
+				}
+				a, b = pick(rep.Groups[1]), pick(rep.Groups[0])
+			default:
+				return fmt.Errorf("give a deployment or --pods old,new")
+			}
+			secs := int(dur.Seconds())
+			fmt.Fprintf(os.Stderr, "profiling %s and %s for %s…\n", a.name, b.name, dur)
+			var pa, pb *model.Profile
+			var ea, eb error
+			if a.node != b.node { // one profile per node at a time: parallel only across nodes
+				var wg sync.WaitGroup
+				wg.Add(2)
+				go func() { defer wg.Done(); pa, ea = o.src.Profile(ctx, a.node, a.id, secs, hz) }()
+				go func() { defer wg.Done(); pb, eb = o.src.Profile(ctx, b.node, b.id, secs, hz) }()
+				wg.Wait()
+			} else {
+				pa, ea = o.src.Profile(ctx, a.node, a.id, secs, hz)
+				if ea == nil {
+					pb, eb = o.src.Profile(ctx, b.node, b.id, secs, hz)
+				}
+			}
+			if err := errors.Join(ea, eb); err != nil {
+				return err
+			}
+			if o.output == "json" {
+				return o.jsonOut(os.Stdout, analysis.ProfileDiff(pa, pb))
+			}
+			render.ProfileDiff(os.Stdout, o.style(), pa, pb, a.name, b.name, n)
+			return nil
+		},
+	}
+	c.Flags().DurationVarP(&dur, "duration", "d", 15*time.Second, "duration of each profile")
+	c.Flags().IntVar(&hz, "hz", 99, "sampling frequency")
+	c.Flags().StringSliceVar(&pods, "pods", nil, "compare two pods: --pods old-pod,new-pod")
+	c.Flags().IntVar(&n, "top", 25, "number of functions to show")
+	return c
 }

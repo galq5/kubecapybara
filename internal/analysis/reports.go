@@ -272,3 +272,49 @@ func Folded(p *model.Profile) string {
 	}
 	return b.String()
 }
+
+// FuncDelta is the change of a function's share of CPU samples between two
+// profiles.
+type FuncDelta struct {
+	Name        string
+	Before, Now float64 // self share of samples (0..1)
+	TotalBefore float64
+	TotalNow    float64
+}
+
+// ProfileDiff compares two profiles by self and total share per function,
+// sorted by the largest self-share change.
+func ProfileDiff(before, now *model.Profile) []FuncDelta {
+	share := func(p *model.Profile) (map[string]float64, map[string]float64) {
+		self, total := map[string]float64{}, map[string]float64{}
+		if p.Samples == 0 {
+			return self, total
+		}
+		for _, f := range TopFunctions(p) {
+			self[f.Name] = float64(f.Self) / float64(p.Samples)
+			total[f.Name] = float64(f.Total) / float64(p.Samples)
+		}
+		return self, total
+	}
+	sb, tb := share(before)
+	sn, tn := share(now)
+	names := map[string]bool{}
+	for k := range sb {
+		names[k] = true
+	}
+	for k := range sn {
+		names[k] = true
+	}
+	var out []FuncDelta
+	for n := range names {
+		out = append(out, FuncDelta{Name: n, Before: sb[n], Now: sn[n], TotalBefore: tb[n], TotalNow: tn[n]})
+	}
+	abs := func(x float64) float64 {
+		if x < 0 {
+			return -x
+		}
+		return x
+	}
+	sort.Slice(out, func(i, j int) bool { return abs(out[i].Now-out[i].Before) > abs(out[j].Now-out[j].Before) })
+	return out
+}

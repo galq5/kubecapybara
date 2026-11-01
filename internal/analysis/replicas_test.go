@@ -127,3 +127,54 @@ func TestPoolsAndStorms(t *testing.T) {
 		t.Fatalf("no idle pool finding: %v", rules)
 	}
 }
+
+func TestIncidentTimeline(t *testing.T) {
+	snaps, meta := replicaFixture()
+	t0 := time.Now().Add(-10 * time.Minute)
+	var steps []*View
+	for i := 0; i < 6; i++ {
+		s := *snaps[0]
+		s.Entities = map[string]*model.EntityStats{}
+		lat := uint64(3000)
+		if i >= 4 { // regression in the last two steps
+			lat = 80000
+		}
+		s.Entities["pod:api-0"] = &model.EntityStats{ID: "pod:api-0", HTTP: map[string]*model.HTTPEndpoint{
+			"server GET /": {Role: "server", Count: 100, Status: map[string]uint64{"2xx": 100}, Lat: hist(lat, 100)}}}
+		v := Build([]*model.Snapshot{&s}, meta, Options{})
+		v.From, v.To = t0.Add(time.Duration(i)*time.Minute), t0.Add(time.Duration(i+1)*time.Minute)
+		steps = append(steps, v)
+	}
+	changes := []k8smeta.Change{
+		{Time: t0.Add(3*time.Minute + 30*time.Second), Kind: "rollout", Namespace: "shop", Name: "Deployment/api", Text: "rollout of deployment shop/api (revision 7)"},
+		{Time: t0.Add(4 * time.Minute), Kind: "node", Name: "Node/x", Text: "node x joined"},
+	}
+	items := Incident(steps, nil, changes)
+	var jump *TimelineItem
+	for i := range items {
+		if items[i].Kind == "metric" && strings.Contains(items[i].Text, "HTTP p99 rose") {
+			jump = &items[i]
+		}
+	}
+	if jump == nil || !strings.Contains(jump.Cause, "revision 7") {
+		t.Fatalf("expected the p99 jump to be attributed to the rollout: %+v", items)
+	}
+}
+
+func TestProfileDiff(t *testing.T) {
+	before := &model.Profile{Samples: 100, Stacks: []model.Stack{
+		{Comm: "app", Frames: []string{"app", "main", "handle", "json.Marshal"}, Count: 20},
+		{Comm: "app", Frames: []string{"app", "main", "handle", "db.Query"}, Count: 80}}}
+	now := &model.Profile{Samples: 100, Stacks: []model.Stack{
+		{Comm: "app", Frames: []string{"app", "main", "handle", "json.Marshal"}, Count: 50},
+		{Comm: "app", Frames: []string{"app", "main", "handle", "db.Query"}, Count: 50}}}
+	d := ProfileDiff(before, now)
+	if len(d) == 0 || (d[0].Name != "json.Marshal" && d[0].Name != "db.Query") || d[0].Now-d[0].Before == 0 {
+		t.Fatalf("diff: %+v", d)
+	}
+	for _, x := range d {
+		if x.Name == "json.Marshal" && (x.Before != 0.2 || x.Now != 0.5) {
+			t.Fatalf("json.Marshal: %+v", x)
+		}
+	}
+}
