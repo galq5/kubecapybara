@@ -3,6 +3,7 @@ package agent
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strconv"
 	"sync"
@@ -39,7 +40,7 @@ type voipCollector struct {
 	sip  *sipTracker
 	prev map[bpf.VoipRtpKey]rtpCounters
 	// codecs learned from SDP (payload type -> name), node-wide
-	codecs map[uint8]string
+	codecs map[uint8]sipparse.Codec
 	// entities with RTP in the previous interval (to zero their gauges)
 	rtpActive map[string]bool
 	// consecutive intervals each outbound stream had no inbound media
@@ -52,11 +53,11 @@ func (c *voipCollector) Start(a *Agent) error {
 	c.a = a
 	c.sip = newSIPTracker()
 	c.prev = map[bpf.VoipRtpKey]rtpCounters{}
-	c.codecs = map[uint8]string{}
+	c.codecs = map[uint8]sipparse.Codec{}
 	c.rtpActive = map[string]bool{}
 	c.oneWayRuns = map[string]int{}
 	for pt, cd := range sipparse.Static {
-		c.codecs[uint8(pt)] = cd.Name
+		c.codecs[uint8(pt)] = cd
 	}
 	spec, err := bpf.LoadVoip()
 	if err != nil {
@@ -150,8 +151,8 @@ func (c *voipCollector) learnCodecs(s *sipparse.SDP) {
 		if pt < 0 || pt > 127 || cd.Clock <= 0 {
 			continue
 		}
-		if c.codecs[uint8(pt)] != cd.Name {
-			c.codecs[uint8(pt)] = cd.Name
+		if c.codecs[uint8(pt)] != cd {
+			c.codecs[uint8(pt)] = cd
 			_ = c.objs.PtClock.Put(uint32(pt), uint32(cd.Clock))
 		}
 	}
@@ -161,6 +162,8 @@ func (c *voipCollector) Collect(w *Window) {
 	now := monoNow()
 	c.mu.Lock()
 	cur, evs := c.sip.collect(now)
+	// the reader goroutine adds codecs learned from SDP under c.mu
+	codecs := maps.Clone(c.codecs)
 	c.mu.Unlock()
 	for _, ev := range evs {
 		ev.Time = c.a.clock.wall(now)
@@ -196,7 +199,7 @@ func (c *voipCollector) Collect(w *Window) {
 		entity := c.a.resolver.Entity(key.Cgroup)
 		samples[entity] = append(samples[entity], rtpSample{
 			egress: key.Egress == 1, ssrc: key.Ssrc, peer: ip16(val.Raddr), peerPort: val.Rport, localPort: val.Lport,
-			codec: c.codecs[val.Pt], d: d, jitterUs: val.JitterNs / 1000, jitterMaxUs: val.JitterMaxNs / 1000,
+			codec: codecs[val.Pt].Name, d: d, jitterUs: val.JitterNs / 1000, jitterMaxUs: val.JitterMaxNs / 1000,
 		})
 	}
 	for _, k := range stale {

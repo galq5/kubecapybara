@@ -141,10 +141,7 @@ func NormalizePath(p string) string {
 		}
 	}
 	out := strings.Join(segs, "/")
-	if len(out) > 80 {
-		out = out[:80] + "…"
-	}
-	return out
+	return truncate(out, 80)
 }
 
 func statusClass(code int) string {

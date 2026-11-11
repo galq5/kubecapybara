@@ -150,7 +150,11 @@ func (c *dnsCollector) handle(ev *bpf.DnsDnsEvent, msg *dnsparse.Message) {
 	if !ok {
 		return
 	}
-	lat := (ev.Ts - pend.ts) / 1000
+	// ring buffer records of different CPUs can arrive slightly out of order
+	var lat uint64
+	if ev.Ts > pend.ts {
+		lat = (ev.Ts - pend.ts) / 1000
+	}
 	st.Responses++
 	st.Lat.Observe(lat)
 	if st.RCodes == nil {
@@ -208,10 +212,12 @@ func (c *dnsCollector) server(entity string) *model.DNSStats {
 }
 
 func (c *dnsCollector) Collect(w *Window) {
-	now := monoNow()
 	c.mu.Lock()
+	// read the clock under the lock: a query recorded while we waited for it
+	// is newer than an earlier reading, and now-p.ts would wrap around
+	now := monoNow()
 	for k, p := range c.clients {
-		if now-p.ts > uint64(dnsTimeout) {
+		if now > p.ts && now-p.ts > uint64(dnsTimeout) {
 			delete(c.clients, k)
 			st := c.client(p.entity)
 			st.Timeouts++
@@ -224,7 +230,7 @@ func (c *dnsCollector) Collect(w *Window) {
 		}
 	}
 	for k, p := range c.servers {
-		if now-p.ts > uint64(dnsTimeout) {
+		if now > p.ts && now-p.ts > uint64(dnsTimeout) {
 			delete(c.servers, k)
 			c.server(p.entity).Timeouts++
 		}

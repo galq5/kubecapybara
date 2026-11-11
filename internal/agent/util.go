@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -16,6 +17,26 @@ func ip16(b [16]uint8) string {
 		return ""
 	}
 	return a.String()
+}
+
+// cutRunes returns the first n bytes of s, shortened so that no UTF-8
+// sequence is cut in half.
+func cutRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
+// truncate shortens s to at most n bytes plus an ellipsis.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return cutRunes(s, n) + "…"
 }
 
 // cstr converts a NUL terminated C char array into a Go string.

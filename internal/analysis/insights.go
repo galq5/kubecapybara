@@ -217,7 +217,10 @@ func OOMRisks(v *View) []OOMRisk {
 		if left <= 0 {
 			continue
 		}
-		eta := time.Duration(left/slope) * time.Second
+		// a nearly flat trend projects centuries ahead: do not overflow into a
+		// negative ("imminent") ETA
+		secs := math.Min(left/slope, 100*365*24*3600)
+		eta := time.Duration(secs) * time.Second
 		e := v.Entities[id]
 		ep := Endpoint{ID: id, Name: id}
 		if e != nil {

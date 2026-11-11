@@ -37,6 +37,11 @@ func newMetrics(a *Agent) *metrics {
 	return &metrics{a: a, vals: map[string]*promSeries{}, types: map[string]string{}, help: map[string]string{}, maxIdle: 30 * time.Minute}
 }
 
+// labelEscaper escapes a label value for the Prometheus text format, which
+// knows only these three escapes (strconv.Quote also emits \t, \xNN and
+// \uNNNN, which strict parsers reject, failing the whole scrape).
+var labelEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+
 func labels(kv ...string) string {
 	var b strings.Builder
 	for i := 0; i+1 < len(kv); i += 2 {
@@ -47,8 +52,9 @@ func labels(kv ...string) string {
 			b.WriteByte(',')
 		}
 		b.WriteString(kv[i])
-		b.WriteByte('=')
-		b.WriteString(strconv.Quote(kv[i+1]))
+		b.WriteString(`="`)
+		b.WriteString(labelEscaper.Replace(strings.ToValidUTF8(kv[i+1], "\uFFFD")))
+		b.WriteByte('"')
 	}
 	return b.String()
 }

@@ -231,3 +231,25 @@ func TestMergeFoldsOverflowIntoOther(t *testing.T) {
 		t.Fatalf("lost data on merge: total %d, %d keys", total, len(e.DB))
 	}
 }
+
+// A nearly flat trend towards a huge limit projects centuries ahead; the
+// ETA must not overflow into a negative ("imminent") duration.
+func TestOOMRiskSlowTrendDoesNotOverflow(t *testing.T) {
+	snaps, meta := fixture(t)
+	now := time.Now()
+	var ser []model.ResourceSample
+	for i := 0; i < 30; i++ { // 1 byte per 5s towards a 1TiB limit
+		ser = append(ser, model.ResourceSample{Time: now.Add(time.Duration(i-30) * 5 * time.Second), MemCurrent: uint64(500<<20 + i), MemMax: 1 << 40})
+	}
+	snaps[1].Series = map[string][]model.ResourceSample{"pod:pay-new": ser}
+	v := Build(snaps, meta, Options{})
+	risks := OOMRisks(v)
+	if len(risks) != 1 || risks[0].ETA < 24*time.Hour {
+		t.Fatalf("risks: %+v", risks)
+	}
+	for _, f := range Doctor(v, nil) {
+		if strings.Contains(f.Title, "will hit its memory limit") {
+			t.Fatalf("a flat trend must not raise an OOM finding: %s", f.Title)
+		}
+	}
+}

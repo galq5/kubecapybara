@@ -113,9 +113,7 @@ func NormalizeSQL(q string) string {
 	q = sqlNumber.ReplaceAllString(q, "?")
 	q = sqlIn.ReplaceAllString(q, "IN (?)")
 	q = strings.TrimSpace(sqlSpace.ReplaceAllString(q, " "))
-	if len(q) > 100 {
-		q = q[:100] + "…"
-	}
+	q = truncate(q, 100)
 	if q == "" {
 		q = "(empty)"
 	}
@@ -248,7 +246,7 @@ func redisCommand(b []byte) string {
 		}
 	}
 	if len(cmd) > 40 {
-		cmd = cmd[:40]
+		cmd = cutRunes(cmd, 40)
 	}
 	return cmd
 }
@@ -306,4 +304,6 @@ func DBErrorKind(proto uint8, resp []byte) string {
 	return ""
 }
 
-func dbKey(proto uint8, q string) string { return strconv.Itoa(int(proto)) + "|" + q }
+// dbKey is the EntityStats.DB key: "<protocol name>|<statement>", the same
+// form model.EntityStats.Merge uses for its overflow bucket.
+func dbKey(proto uint8, q string) string { return protoNames[proto] + "|" + q }

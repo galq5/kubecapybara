@@ -429,11 +429,20 @@ func workloadOf(p *Pod) string {
 		return "ReplicaSet/" + p.OwnerName
 	case "Job":
 		// CronJob jobs are named <cronjob>-<timestamp>
-		if i := strings.LastIndexByte(p.OwnerName, '-'); i > 0 && len(p.OwnerName)-i == 9 {
+		if i := strings.LastIndexByte(p.OwnerName, '-'); i > 0 && len(p.OwnerName)-i == 9 && allDigits(p.OwnerName[i+1:]) {
 			return "CronJob/" + p.OwnerName[:i]
 		}
 	}
 	return p.OwnerKind + "/" + p.OwnerName
+}
+
+func allDigits(s string) bool {
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return s != ""
 }
 
 // PodEvent is a Kubernetes Event about a pod (Scheduled, Pulling, Pulled...).
