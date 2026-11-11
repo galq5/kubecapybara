@@ -312,20 +312,36 @@ internal/bpf/        bpf2go generated bindings and compiled objects (committed)
 internal/agent/      collectors, windows/rollups, flight recorder, HTTP API, metrics
 internal/cgroups/    cgroup id → pod/container resolution
 internal/dnsparse/   DNS parsing and ndots heuristics
+internal/sipparse/   SIP and SDP parsing
 internal/symbolize/  kernel/ELF/Go symbolization for the profiler
 internal/k8smeta/    cluster metadata (pods, services, nodes, zones, owners)
-internal/client/     agent discovery (API server proxy, direct URLs, bundles)
+internal/client/     agent discovery (API server proxy, hub, direct URLs, bundles)
 internal/analysis/   name resolution, doctor rules, baseline, rollout, startup, netpol, cost
 internal/render/     text reports shared by CLI and TUI
 internal/tui/        bubbletea dashboard
-cmd/                 capybara-agent, kubectl-capybara
+internal/hub/        capybara-hub: informers, agent fan-out, scoping
+internal/controller/ capybara-controller: CapyFinding objects, notifications
+cmd/                 capybara-agent, kubectl-capybara, capybara-hub, capybara-controller
 deploy/kubernetes/   DaemonSet + RBAC (plain manifests)
 charts/kubecapybara/ Helm chart
 ```
 
 ```bash
-make test        # unit tests
-make test-bpf    # load all eBPF objects into the running kernel (verifier check, needs root)
+make test        # go vet + unit tests
+make lint        # gofmt + go vet
+make test-bpf    # as root: load all eBPF objects into the running kernel (verifier check) and run the live tests
 make generate    # recompile eBPF (needs clang + libbpf headers)
 make vmlinux     # regenerate bpf/headers/vmlinux.h from the running kernel
 ```
+
+Shell completion: `kubectl-capybara completion bash|zsh|fish|powershell`.
+
+## Contributing, security, license
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test and change the
+eBPF programs, and [SECURITY.md](SECURITY.md) for how to report a
+vulnerability and what the agent exposes.
+
+kubecapybara is licensed under the [Apache License 2.0](LICENSE). The eBPF
+programs in `bpf/` are dual licensed `GPL-2.0-only OR BSD-2-Clause` (the kernel
+requires a GPL-compatible license for the helpers they use).

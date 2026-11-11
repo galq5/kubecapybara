@@ -16,8 +16,10 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: vet and unit tests
-        run: make test
+      - name: gofmt and vet
+        run: make lint
+      - name: unit tests (race detector)
+        run: go test -race ./...
       - name: build
         run: make build
 
@@ -32,7 +34,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y clang llvm libbpf-dev
       - name: compile eBPF programs
         run: make generate
-      - name: load programs into the runner kernel (verifier)
+      - name: load programs into the runner kernel (verifier) and run the live tests
         run: make test-bpf
 
   chart:

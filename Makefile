@@ -33,9 +33,16 @@ test:
 	go vet ./...
 	go test ./...
 
-# Load every eBPF object into the running kernel (verifier check). Needs root.
+# Kernel tests, as root: load every eBPF object into the running kernel
+# (verifier check) and run the live collector tests against real sockets.
 test-bpf:
 	sudo -E env "PATH=$$PATH" go test -count=1 -v ./internal/bpf/
+	sudo -E env "PATH=$$PATH" go test -count=1 -v -run TestListenerSurvivesAccept ./internal/agent/
+
+# Formatting and static checks (also run by CI).
+lint:
+	@unformatted=$$(gofmt -l cmd internal hack); if [ -n "$$unformatted" ]; then echo "gofmt needed:"; echo "$$unformatted"; exit 1; fi
+	go vet ./...
 
 image:
 	docker build --build-arg VERSION=$(VERSION) -t $(IMAGE):$(VERSION) -t $(IMAGE):latest .
