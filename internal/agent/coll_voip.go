@@ -481,7 +481,7 @@ func (t *sipTracker) handle(entity, peer string, ts uint64, egress bool, m *sipp
 		return &model.Event{
 			Entity: entity, Type: model.EvSIP, Severity: model.SevWarn,
 			Message: fmt.Sprintf("SIP INVITE %s %s %s failed: %d %s after %s", tx.uri, dir, tx.peer, m.Status, m.Reason,
-				(time.Duration(lat) * time.Microsecond).Round(time.Millisecond)),
+				roundLatency(time.Duration(lat)*time.Microsecond)),
 			Fields: map[string]string{"code": strconv.Itoa(m.Status), "role": role, "peer": tx.peer},
 		}
 	}

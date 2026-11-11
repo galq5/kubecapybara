@@ -11,6 +11,7 @@ import (
 	"github.com/cilium/ebpf/ringbuf"
 
 	"github.com/galq5/kubecapybara/internal/bpf"
+	"github.com/galq5/kubecapybara/internal/cgroups"
 	"github.com/galq5/kubecapybara/internal/model"
 )
 
@@ -239,7 +240,7 @@ func (c *procCollector) handle(ev *bpf.ProcCapyProcEvent) {
 		}
 
 	case procEvOOM:
-		info := a.resolver.Lookup(ev.Cgroup)
+		info := c.oomVictim(ev.Cgroup, ev.TargetPid)
 		msg := fmt.Sprintf("OOM killer selected pid %d (anon-rss %s, file-rss %s, total-vm %s)",
 			ev.TargetPid, kb(ev.Extra[1]), kb(ev.Extra[2]), kb(ev.Extra[0]))
 		a.rec.Add(model.Event{
@@ -250,6 +251,20 @@ func (c *procCollector) handle(ev *bpf.ProcCapyProcEvent) {
 			a.rec.Crash(info.Entity, "OOM killed", t)
 		}
 	}
+}
+
+// oomVictim returns the cgroup of the process the OOM killer selected. The
+// tracepoint runs in the task whose allocation triggered the killer: with a
+// container at its own limit that is a neighbour of the victim, but when the
+// node itself runs out of memory it can be any process, which must not get
+// the crash report. The victim is still in /proc when it is marked; if it is
+// gone already, fall back to the triggering task's cgroup.
+func (c *procCollector) oomVictim(trigger uint64, victimPid uint32) *cgroups.Info {
+	a := c.a
+	if cg, err := a.resolver.ProcCgroupID(a.cfg.ProcRoot, victimPid); err == nil {
+		return a.resolver.Lookup(cg)
+	}
+	return a.resolver.Lookup(trigger)
 }
 
 func kb(v uint64) string {

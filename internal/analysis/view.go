@@ -366,17 +366,17 @@ func (v *View) buildEdges(listeners map[string]string) {
 			if p.Side == "client" {
 				if f.clientSide == nil {
 					f.clientSide = p.Clone()
-					f.clientOwner = v.entityKeyNode(p.Owner, s.Node)
 				} else {
 					f.clientSide.Add(p)
 				}
+				f.clientOwner = v.preferOwner(f.clientOwner, p.Owner, s.Node)
 			} else {
 				if f.serverSide == nil {
 					f.serverSide = p.Clone()
-					f.serverOwner = v.entityKeyNode(p.Owner, s.Node)
 				} else {
 					f.serverSide.Add(p)
 				}
+				f.serverOwner = v.preferOwner(f.serverOwner, p.Owner, s.Node)
 			}
 		}
 	}
@@ -448,6 +448,17 @@ func (v *View) buildEdges(listeners map[string]string) {
 		}
 		return a.Client.Display()+a.Server.Display() < b.Client.Display()+b.Server.Display()
 	})
+}
+
+// preferOwner picks the owner of one side of a flow. Counters recorded
+// without socket ownership (e.g. a reset answered for a connection in
+// TIME_WAIT) come with the owner "unknown": a known owner of the same flow
+// wins whatever the order of the pairs.
+func (v *View) preferOwner(cur, owner, node string) string {
+	if cur == "" || strings.HasPrefix(cur, "unknown\x00") && owner != "unknown" && owner != "" {
+		return v.entityKeyNode(owner, node)
+	}
+	return cur
 }
 
 // entityKeyNode returns "<entity>\x00<node>" so ownerEndpoint can resolve it.

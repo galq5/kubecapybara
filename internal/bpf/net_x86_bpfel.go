@@ -146,12 +146,13 @@ type NetProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type NetMapSpecs struct {
-	ConnErrs  *ebpf.MapSpec `ebpf:"conn_errs"`
-	NetEvents *ebpf.MapSpec `ebpf:"net_events"`
-	Pairs     *ebpf.MapSpec `ebpf:"pairs"`
-	Socks     *ebpf.MapSpec `ebpf:"socks"`
-	Young     *ebpf.MapSpec `ebpf:"young"`
-	ZeroPair  *ebpf.MapSpec `ebpf:"zero_pair"`
+	ConnErrs    *ebpf.MapSpec `ebpf:"conn_errs"`
+	ListenPorts *ebpf.MapSpec `ebpf:"listen_ports"`
+	NetEvents   *ebpf.MapSpec `ebpf:"net_events"`
+	Pairs       *ebpf.MapSpec `ebpf:"pairs"`
+	Socks       *ebpf.MapSpec `ebpf:"socks"`
+	Young       *ebpf.MapSpec `ebpf:"young"`
+	ZeroPair    *ebpf.MapSpec `ebpf:"zero_pair"`
 }
 
 // NetVariableSpecs contains global variables before they are loaded into the kernel.
@@ -181,17 +182,19 @@ func (o *NetObjects) Close() error {
 //
 // It can be passed to LoadNetObjects or ebpf.CollectionSpec.LoadAndAssign.
 type NetMaps struct {
-	ConnErrs  *ebpf.Map `ebpf:"conn_errs"`
-	NetEvents *ebpf.Map `ebpf:"net_events"`
-	Pairs     *ebpf.Map `ebpf:"pairs"`
-	Socks     *ebpf.Map `ebpf:"socks"`
-	Young     *ebpf.Map `ebpf:"young"`
-	ZeroPair  *ebpf.Map `ebpf:"zero_pair"`
+	ConnErrs    *ebpf.Map `ebpf:"conn_errs"`
+	ListenPorts *ebpf.Map `ebpf:"listen_ports"`
+	NetEvents   *ebpf.Map `ebpf:"net_events"`
+	Pairs       *ebpf.Map `ebpf:"pairs"`
+	Socks       *ebpf.Map `ebpf:"socks"`
+	Young       *ebpf.Map `ebpf:"young"`
+	ZeroPair    *ebpf.Map `ebpf:"zero_pair"`
 }
 
 func (m *NetMaps) Close() error {
 	return _NetClose(
 		m.ConnErrs,
+		m.ListenPorts,
 		m.NetEvents,
 		m.Pairs,
 		m.Socks,

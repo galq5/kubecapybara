@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/galq5/kubecapybara/internal/bpf"
@@ -104,5 +107,56 @@ func TestTruncationKeepsValidUTF8(t *testing.T) {
 	}
 	if got := truncate("short", 80); got != "short" {
 		t.Fatalf("truncate changed a short string: %q", got)
+	}
+}
+
+// The OOM tracepoint runs in the task that triggered the killer: the kill
+// must be attributed to the victim's pod, not to the trigger's.
+func TestOOMAttributedToVictim(t *testing.T) {
+	root, proc := t.TempDir(), t.TempDir()
+	const (
+		victim  = "/kubepods/pod11111111-2222-3333-4444-555555555555/c1"
+		trigger = "/kubepods/pod99999999-2222-3333-4444-555555555555/c1"
+	)
+	for _, d := range []string{victim, trigger} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(proc, "4242"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proc, "4242", "cgroup"), []byte("0::"+victim+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := cgroups.NewResolver(root)
+	c := &procCollector{a: &Agent{cfg: Config{ProcRoot: proc}, resolver: r}}
+	var triggerID uint64
+	for _, id := range r.IDsForEntity("pod:99999999-2222-3333-4444-555555555555") {
+		triggerID = id
+	}
+	if triggerID == 0 {
+		t.Fatal("trigger cgroup not found")
+	}
+	if got := c.oomVictim(triggerID, 4242).Entity; got != "pod:11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("OOM attributed to %s, want the victim's pod", got)
+	}
+	// the victim was reaped before the event was read: the trigger's cgroup
+	if got := c.oomVictim(triggerID, 777).Entity; got != "pod:99999999-2222-3333-4444-555555555555" {
+		t.Fatalf("fallback: %s", got)
+	}
+}
+
+func TestRoundLatency(t *testing.T) {
+	for in, want := range map[time.Duration]string{
+		40 * time.Microsecond:               "40µs",
+		20123456 * time.Nanosecond:          "20ms",
+		3204567 * time.Microsecond:          "3.2s",
+		1234567 * time.Nanosecond:           "1.235ms",
+		32*time.Second + 4*time.Millisecond: "32s",
+	} {
+		if got := roundLatency(in).String(); got != want {
+			t.Errorf("roundLatency(%s) = %s, want %s", in, got, want)
+		}
 	}
 }

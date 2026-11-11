@@ -81,7 +81,7 @@ Run without arguments for the interactive dashboard.`,
 			return o.runTop(cmd.Context())
 		},
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Name() == "version" {
+			if offline(cmd) {
 				return nil
 			}
 			return o.init()
@@ -120,6 +120,18 @@ Run without arguments for the interactive dashboard.`,
 		o.cmdControlPlane(), o.cmdCounters(), o.cmdMap(), o.cmdVoIP(),
 	)
 	return root
+}
+
+// offline reports whether a command needs no agents or cluster: version,
+// help and shell completion must work without a kubeconfig.
+func offline(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		switch c.Name() {
+		case "version", "help", "completion", cobra.ShellCompRequestCmd, cobra.ShellCompNoDescRequestCmd:
+			return true
+		}
+	}
+	return false
 }
 
 // Execute runs the CLI.

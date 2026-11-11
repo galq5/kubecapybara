@@ -145,6 +145,15 @@ struct {
 	__type(value, __u64);
 } young SEC(".maps");
 
+/* port of each listening socket: a socket bound to port 0 has already
+ * released its port when the end of the listen is reported */
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 16384);
+	__type(key, __u64);
+	__type(value, __u16);
+} listen_ports SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
 	__uint(max_entries, 256 * 1024);
@@ -169,6 +178,11 @@ static __always_inline __u8 heuristic_role(struct sock *sk)
 	__u16 lport = BPF_CORE_READ(sk, __sk_common.skc_num);
 	__u16 rport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
 
+	/* A closed socket has released its ephemeral port (e.g. the reset sent
+	 * when closing with unread data): it was a client. Sockets accepted on
+	 * a bound port keep it. */
+	if (!lport)
+		return ROLE_CLIENT;
 	return lport < rport ? ROLE_SERVER : ROLE_CLIENT;
 }
 
@@ -186,6 +200,9 @@ static __always_inline int build_key(struct sock *sk, __u8 role, struct pair_key
 	sk_local_remote(sk, family, laddr, raddr);
 	lport = BPF_CORE_READ(sk, __sk_common.skc_num);
 	rport = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
+	/* not connected (e.g. a reset sent on behalf of a listener): no flow */
+	if (!rport)
+		return -1;
 
 	if (role == ROLE_CLIENT) {
 		__builtin_memcpy(key->saddr, laddr, 16);
@@ -273,7 +290,7 @@ static __always_inline void flush_bytes(struct sock *sk, struct sk_info *info, s
 	info->last_rcvd = rcvd;
 }
 
-static __always_inline void emit_listen(struct sock *sk, __u8 type)
+static __always_inline void emit_listen(struct sock *sk, __u8 type, __u16 port)
 {
 	struct net_event *ev;
 	__u16 family = BPF_CORE_READ(sk, __sk_common.skc_family);
@@ -289,7 +306,7 @@ static __always_inline void emit_listen(struct sock *sk, __u8 type)
 	/* the closing context may differ from the owner: use the socket's cgroup */
 	ev->cgroup = type == EV_LISTEN ? bpf_get_current_cgroup_id() : sock_cgroup_id(sk);
 	ev->pid = bpf_get_current_pid_tgid() >> 32;
-	ev->port = BPF_CORE_READ(sk, __sk_common.skc_num);
+	ev->port = port;
 	sk_local_remote(sk, family, ev->addr, raddr);
 	bpf_get_current_comm(ev->comm, sizeof(ev->comm));
 	bpf_ringbuf_submit(ev, 0);
@@ -334,11 +351,24 @@ int BPF_PROG(on_state, struct sock *sk, int oldstate, int newstate)
 		return 0;
 
 	if (newstate == TCP_LISTEN) {
-		emit_listen(sk, EV_LISTEN);
+		__u16 port = BPF_CORE_READ(sk, __sk_common.skc_num);
+
+		bpf_map_update_elem(&listen_ports, &skp, &port, BPF_ANY);
+		emit_listen(sk, EV_LISTEN, port);
 		return 0;
 	}
-	if (oldstate == TCP_LISTEN) {
-		emit_listen(sk, EV_UNLISTEN);
+	/* An accepted connection is a clone of its listener, so its first
+	 * transition is reported as LISTEN -> SYN_RECV: the listener itself is
+	 * still listening. */
+	if (oldstate == TCP_LISTEN && newstate != TCP_SYN_RECV) {
+		__u16 port = BPF_CORE_READ(sk, __sk_common.skc_num);
+		__u16 *lp = bpf_map_lookup_elem(&listen_ports, &skp);
+
+		if (lp) {
+			port = *lp;
+			bpf_map_delete_elem(&listen_ports, &skp);
+		}
+		emit_listen(sk, EV_UNLISTEN, port);
 		return 0;
 	}
 

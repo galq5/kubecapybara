@@ -19,6 +19,19 @@ func ip16(b [16]uint8) string {
 	return a.String()
 }
 
+// roundLatency rounds a latency for event messages, keeping about three
+// significant digits (rounding everything to milliseconds turns a 40µs
+// answer into "0s").
+func roundLatency(d time.Duration) time.Duration {
+	switch {
+	case d >= time.Second:
+		return d.Round(10 * time.Millisecond)
+	case d >= 10*time.Millisecond:
+		return d.Round(time.Millisecond)
+	}
+	return d.Round(time.Microsecond)
+}
+
 // cutRunes returns the first n bytes of s, shortened so that no UTF-8
 // sequence is cut in half.
 func cutRunes(s string, n int) string {
