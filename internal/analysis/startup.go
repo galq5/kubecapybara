@@ -109,20 +109,27 @@ func Startup(v *View, pod *k8smeta.Pod) *StartupReport {
 	}
 	sort.SliceStable(rep.Timeline, func(i, j int) bool { return rep.Timeline[i].Time.Before(rep.Timeline[j].Time) })
 
-	// phases
+	// phases. Kubernetes reports the start of the current container and the
+	// last time the pod became Ready: after a restart those are later than
+	// the traced first start, and a phase between them would be negative.
+	phase := func(name string, d time.Duration) {
+		if d >= 0 {
+			rep.Phases = append(rep.Phases, Phase{name, d})
+		}
+	}
 	if t, ok := pod.Conditions["PodScheduled"]; ok {
-		rep.Phases = append(rep.Phases, Phase{"scheduling", t.Sub(pod.Created)})
+		phase("scheduling", t.Sub(pod.Created))
 		if !firstStart.IsZero() {
-			rep.Phases = append(rep.Phases, Phase{"image pull + init + create", firstStart.Sub(t)})
+			phase("image pull + init + create", firstStart.Sub(t))
 		}
 	}
 	if !firstStart.IsZero() && !firstListen.IsZero() {
-		rep.Phases = append(rep.Phases, Phase{"app start → listening", firstListen.Sub(firstStart)})
+		phase("app start → listening", firstListen.Sub(firstStart))
 	}
 	if !firstListen.IsZero() && ready {
-		rep.Phases = append(rep.Phases, Phase{"listening → Ready (probes)", readyAt.Sub(firstListen)})
+		phase("listening → Ready (probes)", readyAt.Sub(firstListen))
 	} else if !firstStart.IsZero() && ready {
-		rep.Phases = append(rep.Phases, Phase{"container start → Ready", readyAt.Sub(firstStart)})
+		phase("container start → Ready", readyAt.Sub(firstStart))
 	}
 
 	// advice
@@ -137,7 +144,7 @@ func Startup(v *View, pod *k8smeta.Pod) *StartupReport {
 	if probeRefused > 0 {
 		rep.Advice = append(rep.Advice, fmt.Sprintf("kubelet probes were refused %d time(s) before the app listened: consider a startupProbe instead of a long initialDelaySeconds", probeRefused))
 	}
-	if !firstListen.IsZero() && ready {
+	if !firstListen.IsZero() && ready && readyAt.After(firstListen) {
 		gap := readyAt.Sub(firstListen)
 		for _, c := range pod.Containers {
 			for _, p := range c.Probes {

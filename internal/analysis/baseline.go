@@ -104,7 +104,8 @@ func Regressions(cur, base *View) []Finding {
 			sort.Strings(deps)
 			out = append(out, Finding{Severity: SevInfo, Category: "regression",
 				Title:  fmt.Sprintf("%d new dependency(ies) not seen in the baseline window", len(deps)),
-				Detail: top(deps, 10), Score: float64(len(deps))})
+				Detail: top(deps, 10), Score: float64(len(deps)),
+				Hint: "expected right after a deploy; otherwise look at what the workload started talking to: `kubectl capybara edges -f <workload>`"})
 		}
 	}
 	return out

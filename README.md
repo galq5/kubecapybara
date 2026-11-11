@@ -14,20 +14,25 @@ kubectl capybara startup payments-7f9c # why does it take 40s to become Ready?
 
 ![doctor overview](docs/screens/overview.png)
 
-<details><summary>More screens: pods, pod detail, connection detail, network, rightsizing, nodes, DNS</summary>
+<details><summary>More screens: pods, pod detail, network, connection detail, services, DNS, apps (HTTP, databases, files), nodes, cost, VoIP</summary>
 
 ![pods](docs/screens/pods.png)
 ![pod detail](docs/screens/pod-detail.png)
-![connection detail](docs/screens/edge-detail.png)
 ![network](docs/screens/network.png)
-![rightsizing](docs/screens/cost.png)
-![nodes](docs/screens/nodes.png)
+![connection detail](docs/screens/edge-detail.png)
+![services](docs/screens/services.png)
 ![dns](docs/screens/dns.png)
+![apps](docs/screens/apps.png)
+![nodes](docs/screens/nodes.png)
+![cost](docs/screens/cost.png)
+![voip](docs/screens/voip.png)
 
 </details>
 
-Regenerate with `go run ./hack/screenshot --from-file <bundle.json>` (renders
-HTML frames; any headless browser turns them into PNGs).
+The screens show the built-in demo cluster (`internal/demo`). Regenerate them
+with `go run ./hack/screenshot --demo --out /tmp/screens` and
+`node hack/screenshot/png.js /tmp/screens docs/screens` (needs Playwright), or
+render your own cluster with `--from-file <bundle.json>`.
 
 ## What it shows
 
@@ -41,7 +46,7 @@ HTML frames; any headless browser turns them into PNGs).
 | Why did it crash? | `why-crash <pod>` | Flight recorder: the last 2 minutes of execs, signals (and who sent them), exits, OOM kills, DNS and connect failures plus memory/CPU samples, frozen when the container's PID 1 dies |
 | Why is startup slow? | `startup <pod>` | Timeline from pod creation → scheduling → container start → DNS lookups → connects → `listen()` → probes → Ready, with advice |
 | What does it talk to? | `edges -f <name>` | Live dependency map including external hosts by name (learned from DNS answers) |
-| HTTP errors/latency? | `http` | HTTP/1.x rate, errors, latency per route without sidecars (opt-in `--l7`) |
+| HTTP errors/latency? | `http` | HTTP/1.x rate, errors, latency per route and workload without sidecars (`--per-pod` for each replica; opt-in `--l7`) |
 | Which queries are slow? | `db` | Plaintext Postgres (simple + extended protocol), MySQL, Redis, Cassandra (CQL v3-v5, matched by stream id, with error kinds such as ReadTimeout/Unavailable), Kafka (per API and client id), MongoDB (OP_MSG command + collection) and Memcached: rate, errors, p50/p99, time spent (opt-in `--l7`) |
 | Which files is my pod waiting on? | `files` | Slow read/write/fsync on regular files with filesystem type (nfs, ext4, xfs…) (opt-in `--files`) |
 | Is anything shady going on? | `security` | Interactive `kubectl exec` sessions, shells spawned by app processes, undeclared listening ports, internet egress |
@@ -263,7 +268,7 @@ x86_64 (arm64 needs an arm64 `vmlinux.h`, see Development). Drop reasons need
 ## Using it
 
 ```bash
-kubectl capybara                                # dashboard: tabs, filter with /, enter for pod details
+kubectl capybara                                # dashboard (see below)
 kubectl capybara doctor -n shop                 # findings for one namespace
 kubectl capybara edges --sort rtt -f payments   # slowest paths involving "payments"
 kubectl capybara pod shop/payments-7f9c -w 5m   # 5 minute window
@@ -275,6 +280,28 @@ kubectl capybara --from-file incident.json doctor   # …and analyse it anywhere
 kubectl capybara events --type oom,signal,exec_session
 kubectl capybara doctor -o json                 # for scripts and CI
 ```
+
+### The dashboard
+
+`kubectl capybara` opens the dashboard. It fits terminals from 80×24 up:
+on narrow ones the tables keep their error columns and drop volumes first.
+
+| Tab | Key | What it answers |
+|---|---|---|
+| Overview | `1` | What is wrong right now: the doctor's findings, worst first, each with its evidence and what to do. `↑`/`↓` select a finding, `enter` opens the pod it is about |
+| Network | `2` | Every connection between pods, Services and the outside: latency, errors, volume. `enter` opens one connection |
+| Pods | `3` | CPU, waiting for CPU, memory, time to OOM, throttling, errors per pod (`a` adds host processes). `enter` opens a pod: last crash, where its time goes, dependencies, HTTP, database, startup |
+| Services | `4` | Load balance over backends, replicas worse than their siblings, connection pools |
+| DNS | `5` | Clients, DNS server replicas, most queried and failing names |
+| Apps | `6` | What applications wait on: HTTP routes and database statements per workload, slow files |
+| Nodes | `7` | One line per node, node-to-node latency, workloads of the busiest nodes, packet drops, control plane |
+| Events | `8` | Flight recorder, newest first |
+| Security | `9` | Exec sessions, shells, undeclared ports, blocked traffic, internet egress |
+| Cost | `0` | Cost per namespace, rightsizing and cross-zone traffic over the baseline window |
+| VoIP | `v` | SIP calls and RTP quality; only shown when there is voice traffic |
+
+`/` filters every tab, `s`/`S` change the sort order of the Network and Pods
+tables, `<`/`>` scroll sideways, `?` lists all keys.
 
 Talk to agents directly (e.g. on a single node, without the API server):
 
@@ -319,6 +346,7 @@ internal/client/     agent discovery (API server proxy, hub, direct URLs, bundle
 internal/analysis/   name resolution, doctor rules, baseline, rollout, startup, netpol, cost
 internal/render/     text reports shared by CLI and TUI
 internal/tui/        bubbletea dashboard
+internal/demo/       synthetic cluster for the dashboard tests and the screenshots
 internal/hub/        capybara-hub: informers, agent fan-out, scoping
 internal/controller/ capybara-controller: CapyFinding objects, notifications
 cmd/                 capybara-agent, kubectl-capybara, capybara-hub, capybara-controller

@@ -65,15 +65,16 @@ func SeriesSparks(v *analysis.View, id string, width int) (cpu, mem string) {
 func Rightsize(w io.Writer, st Style, v *analysis.View, f Filter, price analysis.Pricing) {
 	rows := analysis.Rightsize(v, price)
 	if len(rows) == 0 {
-		fmt.Fprintln(w, st.Dim("no pods with Kubernetes metadata in this window"))
+		Note(w, st, "no pods with Kubernetes metadata in this window")
 		return
 	}
 	if v.Seconds() < 3600 {
-		fmt.Fprintln(w, st.Warn(fmt.Sprintf("! only %s of data: peaks are probably understated, use -w 1h (or longer) before changing requests",
-			time.Duration(v.Seconds()*float64(time.Second)).Round(time.Second))))
+		fmt.Fprintln(w, Wrap(st, st.Warn(fmt.Sprintf("! only %s of data: peaks are probably understated, use -w 1h (or longer) before changing requests",
+			time.Duration(v.Seconds()*float64(time.Second)).Round(time.Second))), 2))
 	}
-	t := &Table{Headers: []string{"WORKLOAD", "PODS", "CPU REQ", "CPU AVG", "CPU PEAK", "→ CPU", "MEM REQ", "MEM LIMIT", "MEM PEAK", "→ MEM", "$/MONTH", "VERDICT"},
-		Right: map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true, 8: true, 9: true, 10: true}, MaxCol: 52}
+	// the verdict comes first: it is what a narrow screen must not cut off
+	t := &Table{Headers: []string{"WORKLOAD", "VERDICT", "PODS", "CPU REQ", "CPU AVG", "CPU PEAK", "→ CPU", "MEM REQ", "MEM LIMIT", "MEM PEAK", "→ MEM", "$/MONTH"},
+		Right: map[int]bool{2: true, 3: true, 4: true, 5: true, 6: true, 7: true, 8: true, 9: true, 10: true, 11: true}, MaxCol: 52}
 	var total float64
 	for _, r := range rows {
 		if !f.match(r.Workload) || (f.Namespace != "" && !strings.HasPrefix(r.Workload, f.Namespace+"/")) {
@@ -107,12 +108,12 @@ func Rightsize(w io.Writer, st Style, v *analysis.View, f Filter, price analysis
 		if r.MemRec > 0 {
 			memRec = mib(r.MemRec)
 		}
-		t.AddRow(r.Workload, fmt.Sprint(r.Pods), milli(r.CPUReq), fmt.Sprintf("%.0fm", r.CPUAvg), peak, fmt.Sprintf("%dm", r.CPURec),
-			mibOrDash(r.MemReq), mibOrDash(r.MemLim), mibOrDash(int64(r.MemPeak)), memRec, money, verdict)
+		t.AddRow(r.Workload, verdict, fmt.Sprint(r.Pods), milli(r.CPUReq), fmt.Sprintf("%.0fm", r.CPUAvg), peak, fmt.Sprintf("%dm", r.CPURec),
+			mibOrDash(r.MemReq), mibOrDash(r.MemLim), mibOrDash(int64(r.MemPeak)), memRec, money)
 	}
 	t.Render(w, st)
-	fmt.Fprintf(w, "\n%s  (CPU → 1.2× peak, memory → 1.25× peak; $%.3f/vCPU-h, $%.4f/GiB-h; * = window average, no 5s samples)\n",
-		st.Title(fmt.Sprintf("potential savings ≈ %s/month", analysis.Money(total))), price.CorePerHour, price.GiBPerHour)
+	fmt.Fprintf(w, "\n%s\n", st.Title(fmt.Sprintf("potential savings ≈ %s/month", analysis.Money(total))))
+	Note(w, st, fmt.Sprintf("CPU → 1.2× peak, memory → 1.25× peak; $%.3f/vCPU-h, $%.4f/GiB-h; * = window average, no 5s samples", price.CorePerHour, price.GiBPerHour))
 }
 
 func milli(m int64) string {
@@ -135,7 +136,7 @@ func mibOrDash(b int64) string {
 func OOMRisks(w io.Writer, st Style, v *analysis.View) {
 	risks := analysis.OOMRisks(v)
 	if len(risks) == 0 {
-		fmt.Fprintln(w, st.Dim("no pod is trending towards its memory limit"))
+		Note(w, st, "no pod is trending towards its memory limit")
 		return
 	}
 	t := &Table{Headers: []string{"POD", "MEMORY", "LIMIT", "GROWTH", "LIMIT IN", "FIT"}, Right: map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true}}
@@ -156,7 +157,7 @@ func OOMRisks(w io.Writer, st Style, v *analysis.View) {
 func Denials(w io.Writer, st Style, v *analysis.View, f Filter) {
 	ds := analysis.PolicyDenials(v)
 	if len(ds) == 0 {
-		fmt.Fprintln(w, st.Dim("no packets dropped by NetworkPolicies / firewall rules"))
+		Note(w, st, "no packets dropped by NetworkPolicies / firewall rules")
 		return
 	}
 	t := &Table{Headers: []string{"FROM", "TO", "PORT", "PACKETS", "REASON"}, Right: map[int]bool{2: true, 3: true}, MaxCol: 50}
@@ -222,14 +223,14 @@ func NodeHeatmap(w io.Writer, st Style, v *analysis.View) {
 		}
 		fmt.Fprintln(w)
 	}
-	fmt.Fprintln(w, st.Dim("rows/columns: client and server node; diagonal = traffic within a node; red row = slow node"))
+	Note(w, st, "rows/columns: client and server node; diagonal = traffic within a node; red row = slow node")
 }
 
 // Services prints how evenly Services spread load over their backends.
 func Services(w io.Writer, st Style, v *analysis.View, f Filter) {
 	sbs := analysis.ServiceBalances(v)
 	if len(sbs) == 0 {
-		fmt.Fprintln(w, st.Dim("no Service with two or more active backends in this window"))
+		Note(w, st, "no Service with two or more active backends in this window")
 		return
 	}
 	for _, sb := range sbs {
@@ -318,31 +319,53 @@ func HistBars(w io.Writer, st Style, h model.Hist) {
 	}
 }
 
-// DB prints client-side database statements per pod.
-func DB(w io.Writer, st Style, v *analysis.View, f Filter) {
+// DB prints client-side database statements ranked by the time spent
+// waiting for them. Replicas of a workload run the same statements, so
+// their rows are merged unless perPod is set.
+func DB(w io.Writer, st Style, v *analysis.View, f Filter, perPod bool) {
 	type row struct {
-		e *analysis.EntityView
-		q *model.DBQuery
+		name string
+		q    *model.DBQuery
+		pods map[string]bool
 	}
-	var rows []row
+	by := map[string]*row{}
+	var rows []*row
 	for _, e := range v.Entities {
 		if !f.ns(e.Endpoint) {
 			continue
 		}
+		name := e.Endpoint.WorkloadKey()
+		if perPod {
+			name = e.Endpoint.Display()
+		}
 		for _, q := range e.Stats.DB {
-			if f.match(e.Endpoint.Display(), q.Query, q.Proto) {
-				rows = append(rows, row{e, q})
+			if !f.match(name, e.Endpoint.Display(), q.Query, q.Proto) {
+				continue
 			}
+			k := name + "\x00" + q.Proto + "|" + q.Query
+			r, ok := by[k]
+			if !ok {
+				r = &row{name: name, q: &model.DBQuery{Proto: q.Proto, Query: q.Query}, pods: map[string]bool{}}
+				by[k] = r
+				rows = append(rows, r)
+			}
+			r.q.Merge(q)
+			r.pods[e.ID] = true
 		}
 	}
 	if len(rows) == 0 {
-		fmt.Fprintln(w, st.Dim("no plaintext Postgres/MySQL/Redis traffic observed (agent --l7; TLS connections are not visible)"))
+		Note(w, st, "no database requests observed (plaintext Postgres, MySQL, Redis, Cassandra, Kafka, MongoDB, Memcached; agent --l7; TLS connections are not visible)")
 		return
 	}
 	// rank by total time spent waiting for the statement
-	sort.Slice(rows, func(i, j int) bool { return rows[i].q.Lat.Sum > rows[j].q.Lat.Sum })
-	t := &Table{Headers: []string{"CLIENT", "DB", "STATEMENT", "QPS", "ERRORS", "p50", "p99", "TIME/s"},
-		Right: map[int]bool{3: true, 4: true, 5: true, 6: true, 7: true}, MaxCol: 70}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].q.Lat.Sum != rows[j].q.Lat.Sum {
+			return rows[i].q.Lat.Sum > rows[j].q.Lat.Sum
+		}
+		return rows[i].name+rows[i].q.Query < rows[j].name+rows[j].q.Query
+	})
+	t := &Table{Headers: []string{"CLIENT", "PODS", "DB", "STATEMENT", "QPS", "ERRORS", "p50", "p99", "TIME/s"},
+		Right: map[int]bool{1: true, 4: true, 5: true, 6: true, 7: true, 8: true}, MaxCol: 70}
 	for _, r := range rows {
 		q := r.q
 		errs := analysis.Pct(float64(q.Errors) / float64(q.Count))
@@ -353,11 +376,14 @@ func DB(w io.Writer, st Style, v *analysis.View, f Filter) {
 		if q.Lat.P99() > 500e3 {
 			p99 = st.Warn(p99)
 		}
-		t.AddRow(r.e.Endpoint.Display(), q.Proto, q.Query, analysis.Rate(v.PerSec(q.Count)), errs,
+		t.AddRow(r.name, fmt.Sprint(len(r.pods)), q.Proto, q.Query, analysis.Rate(v.PerSec(q.Count)), errs,
 			analysis.Dur(q.Lat.P50()), p99, analysis.Dur(float64(q.Lat.Sum)/v.Seconds()))
 	}
+	if perPod {
+		t.dropColumn(1)
+	}
 	t.Render(w, st)
-	fmt.Fprintln(w, st.Dim("TIME/s = time spent waiting for this statement per second (where the database time goes)"))
+	Note(w, st, "TIME/s = time spent waiting for this statement per second (where the database time goes)")
 }
 
 // Files prints slow file operations per pod.
@@ -378,7 +404,7 @@ func Files(w io.Writer, st Style, v *analysis.View, f Filter) {
 		}
 	}
 	if len(rows) == 0 {
-		fmt.Fprintln(w, st.Dim("no slow file operations (agent --files, threshold --file-threshold)"))
+		Note(w, st, "no slow file operations (agent --files, threshold --file-threshold)")
 		return
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].fs.WaitNs > rows[j].fs.WaitNs })
@@ -400,7 +426,7 @@ func Files(w io.Writer, st Style, v *analysis.View, f Filter) {
 func Outliers(w io.Writer, st Style, v *analysis.View, f Filter) {
 	outs := analysis.Outliers(v)
 	if len(outs) == 0 {
-		fmt.Fprintln(w, st.Dim("no outlier replicas (workloads need 3+ active pods)"))
+		Note(w, st, "no outlier replicas (workloads need 3+ active pods)")
 		return
 	}
 	t := &Table{Headers: []string{"WORKLOAD", "POD", "NODE", "METRIC", "POD VALUE", "SIBLINGS (MEDIAN)", "×"},
@@ -421,7 +447,7 @@ func Outliers(w io.Writer, st Style, v *analysis.View, f Filter) {
 // SLOs prints burn rates of service level objectives.
 func SLOs(w io.Writer, st Style, statuses []analysis.SLOStatus) {
 	if len(statuses) == 0 {
-		fmt.Fprintln(w, st.Dim("no SLOs defined (--slo-file slos.yaml, see `kubectl capybara slo --help`)"))
+		Note(w, st, "no SLOs defined (--slo-file slos.yaml, see `kubectl capybara slo --help`)")
 		return
 	}
 	t := &Table{Headers: []string{"SLO", "TARGET", "REQUESTS", "AVAILABILITY", "UNDER LATENCY", "BURN NOW", "BURN BASELINE", "BUDGET GONE IN"},
@@ -462,14 +488,14 @@ func SLOs(w io.Writer, st Style, statuses []analysis.SLOStatus) {
 		t.AddRow(s.Name, target, fmt.Sprint(s.Requests), avail, under, burn, base, gone)
 	}
 	t.Render(w, st)
-	fmt.Fprintln(w, st.Dim("burn 1x = spending the error budget exactly over 30 days; ≥14.4x in both windows pages, ≥6x warns"))
+	Note(w, st, "burn 1x = spending the error budget exactly over 30 days; ≥14.4x in both windows pages, ≥6x warns")
 }
 
 // Pools prints connection pools per client workload and dependency.
 func Pools(w io.Writer, st Style, v *analysis.View, base *analysis.View, f Filter) {
 	pools := analysis.Pools(v, base)
 	if len(pools) == 0 {
-		fmt.Fprintln(w, st.Dim("no client connections observed"))
+		Note(w, st, "no client connections observed")
 		return
 	}
 	t := &Table{Headers: []string{"CLIENT", "DEPENDENCY", "PORT", "PODS", "OPEN", "IDLE", "PER POD", "NEW CONN/s", "BASELINE/s"},
@@ -494,13 +520,13 @@ func Pools(w io.Writer, st Style, v *analysis.View, base *analysis.View, f Filte
 			fmt.Sprintf("%.0f", float64(p.Open)/float64(max(p.Pods, 1))), rate, baseRate)
 	}
 	t.Render(w, st)
-	fmt.Fprintln(w, st.Dim("idle = no data received for 30s; open/idle are the highest values in the window"))
+	Note(w, st, "idle = no data received for 30s; open/idle are the highest values in the window")
 }
 
 // Incident prints an incident timeline.
 func Incident(w io.Writer, st Style, items []analysis.TimelineItem) {
 	if len(items) == 0 {
-		fmt.Fprintln(w, st.Dim("nothing happened in this range"))
+		Note(w, st, "nothing happened in this range")
 		return
 	}
 	for _, it := range items {
@@ -538,14 +564,19 @@ func ProfileDiff(w io.Writer, st Style, before, now *model.Profile, beforeName, 
 		t.AddRow(analysis.Pct(d.Before), analysis.Pct(d.Now), change, analysis.Pct(d.TotalBefore), analysis.Pct(d.TotalNow), d.Name)
 	}
 	t.Render(w, st)
-	fmt.Fprintln(w, st.Dim("shares of CPU samples; pp = percentage points. Java/Node frames need a perf map (/tmp/perf-<pid>.map) to show method names"))
+	Note(w, st, "shares of CPU samples; pp = percentage points. Java/Node frames need a perf map (/tmp/perf-<pid>.map) to show method names")
 }
 
 // ControlPlane prints control plane component health.
-func ControlPlane(w io.Writer, st Style, v *analysis.View) {
-	cs := analysis.ControlPlane(v)
+func ControlPlane(w io.Writer, st Style, v *analysis.View, f Filter) {
+	var cs []analysis.ControlPlaneComponent
+	for _, c := range analysis.ControlPlane(v) {
+		if f.match(c.Role, c.Endpoint.Display(), c.Endpoint.Node) {
+			cs = append(cs, c)
+		}
+	}
 	if len(cs) == 0 {
-		fmt.Fprintln(w, st.Dim("no control plane pods observed (managed control planes run outside the cluster; CoreDNS is shown when present)"))
+		Note(w, st, "no control plane pods observed (managed control planes run outside the cluster; CoreDNS is shown when present)")
 		return
 	}
 	t := &Table{Headers: []string{"ROLE", "POD", "NODE", "RESTARTS", "WAIT CPU", "THROTTLED", "MEM", "DISK p99", "SLOW FSYNC", "STATUS"},
@@ -563,7 +594,7 @@ func ControlPlane(w io.Writer, st Style, v *analysis.View) {
 			analysis.Pct(c.MemPct), analysis.Dur(c.DiskP99), fsync, status)
 	}
 	t.Render(w, st)
-	fmt.Fprintln(w, st.Dim("etcd fsync latency needs the agent's --files flag (disk p99 is used otherwise)"))
+	Note(w, st, "etcd fsync latency needs the agent's --files flag (disk p99 is used otherwise)")
 }
 
 // Counters prints hardware counters of a pod vs its node.
@@ -581,9 +612,16 @@ func Counters(w io.Writer, st Style, c *model.Counters) {
 }
 
 // CostByGroup prints monthly cost per namespace or team.
-func CostByGroup(w io.Writer, st Style, groups []analysis.GroupCost, by string) {
+func CostByGroup(w io.Writer, st Style, groups []analysis.GroupCost, by string, f Filter) {
+	shown := groups[:0:0]
+	for _, g := range groups {
+		if f.match(g.Group) && (f.Namespace == "" || by != "namespace" || g.Group == f.Namespace) {
+			shown = append(shown, g)
+		}
+	}
+	groups = shown
 	if len(groups) == 0 {
-		fmt.Fprintln(w, st.Dim("no pods with Kubernetes metadata in this window"))
+		Note(w, st, "no pods with Kubernetes metadata in this window")
 		return
 	}
 	t := &Table{Headers: []string{strings.ToUpper(by), "PODS", "REQUESTS $/MO", "USED $/MO", "UNUSED $/MO", "CROSS-ZONE $/MO", "EGRESS $/MO", "TOTAL $/MO"},
@@ -601,5 +639,5 @@ func CostByGroup(w io.Writer, st Style, groups []analysis.GroupCost, by string) 
 	t.AddRow(st.Title("total"), "", analysis.Money(tot.RequestUSD), analysis.Money(tot.UsageUSD), analysis.Money(tot.WasteUSD),
 		analysis.Money(tot.CrossZoneUSD), analysis.Money(tot.EgressUSD), analysis.Money(tot.TotalUSD()))
 	t.Render(w, st)
-	fmt.Fprintln(w, st.Dim("monthly extrapolation of the window; requests priced per vCPU-hour and GiB-hour, egress per GB sent to the internet"))
+	Note(w, st, "monthly extrapolation of the window; requests priced per vCPU-hour and GiB-hour, egress per GB sent to the internet")
 }

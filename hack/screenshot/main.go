@@ -1,8 +1,10 @@
-// Command screenshot renders kubecapybara dashboard frames from a snapshot
-// bundle into standalone HTML files (one per tab), used to produce the
-// screenshots in docs/. Turn them into PNGs with any headless browser.
+// Command screenshot renders kubecapybara dashboard frames into standalone
+// HTML files (one per tab), used to produce the screenshots in docs/. The
+// data is the built-in demo cluster (--demo) or a snapshot bundle saved with
+// `kubectl capybara snapshot`.
 //
-//	go run ./hack/screenshot --from-file bundle.json --out docs/screens
+//	go run ./hack/screenshot --demo --out /tmp/screens
+//	node hack/screenshot/png.js /tmp/screens docs/screens   # HTML -> PNG (needs playwright)
 package main
 
 import (
@@ -20,25 +22,40 @@ import (
 
 	"github.com/galq5/kubecapybara/internal/analysis"
 	"github.com/galq5/kubecapybara/internal/client"
+	"github.com/galq5/kubecapybara/internal/demo"
+	"github.com/galq5/kubecapybara/internal/model"
 	"github.com/galq5/kubecapybara/internal/tui"
 )
 
 func main() {
 	var (
-		file   = flag.String("from-file", "", "snapshot bundle")
-		out    = flag.String("out", "docs/screens", "output directory")
-		width  = flag.Int("width", 150, "terminal columns")
-		height = flag.Int("height", 44, "terminal rows")
-		pod    = flag.String("pod", "", "entity to open on the Pods tab (e.g. pod:<uid>)")
+		file    = flag.String("from-file", "", "snapshot bundle")
+		useDemo = flag.Bool("demo", false, "render the built-in demo cluster instead of a bundle")
+		out     = flag.String("out", "docs/screens", "output directory")
+		width   = flag.Int("width", 150, "terminal columns")
+		height  = flag.Int("height", 44, "terminal rows")
+		pod     = flag.String("pod", "", "entity to open on the Pods tab (e.g. pod:<uid>)")
 	)
 	flag.Parse()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 
-	src, err := client.NewFileSource(*file)
-	if err != nil {
-		fail(err)
+	var b *client.Bundle
+	switch {
+	case *useDemo:
+		d := demo.New(time.Now())
+		b = &client.Bundle{From: d.From, To: d.To, Snapshots: d.Snapshots, Baseline: d.Baseline, Meta: d.Meta}
+		if *pod == "" {
+			*pod = "pod:pay2"
+		}
+	case *file != "":
+		src, err := client.NewFileSource(*file)
+		if err != nil {
+			fail(err)
+		}
+		b = src.Bundle()
+	default:
+		fail(fmt.Errorf("give --demo or --from-file <bundle.json>"))
 	}
-	b := src.Bundle()
 	v := analysis.Build(b.Snapshots, b.Meta, analysis.Options{})
 	var base *analysis.View
 	if len(b.Baseline) > 0 {
@@ -54,20 +71,25 @@ func main() {
 	}
 	shots := []shot{
 		{"overview", "Overview", ""}, {"network", "Network", ""}, {"pods", "Pods", ""}, {"services", "Services", ""},
-		{"dns", "DNS", ""}, {"http", "HTTP", ""}, {"nodes", "Nodes", ""}, {"events", "Events", ""},
-		{"security", "Security", ""}, {"cost", "Cost", ""},
+		{"dns", "DNS", ""}, {"apps", "Apps", ""}, {"nodes", "Nodes", ""}, {"events", "Events", ""},
+		{"security", "Security", ""}, {"cost", "Cost", ""}, {"voip", "VoIP", ""},
 	}
 	if *pod != "" {
 		shots = append(shots, shot{"pod-detail", "Pods", *pod})
 	}
-	if len(v.Edges) > 0 {
-		// the busiest pod-to-pod edge
-		for _, e := range v.Edges {
-			if e.Client.Kind == analysis.KindPod && e.Server.Kind == analysis.KindPod {
-				shots = append(shots, shot{"edge-detail", "Network", tui.EdgeKey(e)})
-				break
-			}
+	// the pod-to-pod (or pod-to-Service) connection with the most errors
+	var worst *analysis.Edge
+	errs := func(p *model.Pair) uint64 { return p.Retrans + p.Refused + p.Timeouts }
+	for _, e := range v.Edges {
+		if e.Client.Kind != analysis.KindPod {
+			continue
 		}
+		if worst == nil || errs(e.Stats) > errs(worst.Stats) {
+			worst = e
+		}
+	}
+	if worst != nil {
+		shots = append(shots, shot{"edge-detail", "Network", tui.EdgeKey(worst)})
 	}
 	for _, s := range shots {
 		frame := tui.Frame(res, opts, *width, *height, tui.TabIndex(s.tab), s.detail)

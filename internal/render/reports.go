@@ -82,17 +82,35 @@ func Doctor(w io.Writer, st Style, findings []analysis.Finding, f Filter) {
 	fmt.Fprintf(w, "%d finding(s): %s %d  %s %d  %s %d\n\n", len(findings),
 		st.Crit("crit"), counts[analysis.SevCrit], st.Warn("warn"), counts[analysis.SevWarn], st.Info("info"), counts[analysis.SevInfo])
 	for _, fd := range findings {
-		if !f.match(append([]string{fd.Title, fd.Category}, fd.Detail...)...) {
+		if !MatchFinding(fd, f) {
 			continue
 		}
-		fmt.Fprintf(w, "%s %s %s\n", sev(st, fd.Severity), st.Dim("["+fd.Category+"]"), fd.Title)
-		for _, d := range fd.Detail {
-			fmt.Fprintf(w, "       • %s\n", d)
-		}
-		if fd.Hint != "" {
-			fmt.Fprintf(w, "       %s %s\n", st.Accent("→"), fd.Hint)
-		}
+		Finding(w, st, fd, 0)
 		fmt.Fprintln(w)
+	}
+}
+
+// MatchFinding reports whether a finding passes the text filter.
+func MatchFinding(fd analysis.Finding, f Filter) bool {
+	return f.match(append([]string{fd.Title, fd.Category}, fd.Detail...)...)
+}
+
+// Finding prints one finding: what is wrong, the evidence (at most
+// maxDetails lines, 0 = all) and what to do about it.
+func Finding(w io.Writer, st Style, fd analysis.Finding, maxDetails int) {
+	fmt.Fprintln(w, Wrap(st, fmt.Sprintf("%s %s %s", sev(st, fd.Severity), st.Dim("["+fd.Category+"]"), fd.Title), 7))
+	details := fd.Detail
+	if maxDetails > 0 && len(details) > maxDetails {
+		details = details[:maxDetails]
+	}
+	for _, d := range details {
+		fmt.Fprintln(w, Wrap(st, "       • "+d, 9))
+	}
+	if n := len(fd.Detail) - len(details); n > 0 {
+		Note(w, st, fmt.Sprintf("       … %d more", n))
+	}
+	if fd.Hint != "" {
+		fmt.Fprintln(w, Wrap(st, "       "+st.Accent("→")+" "+fd.Hint, 9))
 	}
 }
 
@@ -244,14 +262,28 @@ func Pods(w io.Writer, st Style, v *analysis.View, f Filter) {
 }
 
 // PodRows returns pod entities matching a filter, busiest first.
-func PodRows(v *analysis.View, f Filter) []*analysis.EntityView {
+func PodRows(v *analysis.View, f Filter) []*analysis.EntityView { return EntityRows(v, f, false) }
+
+// EntityRows returns the pods and, with hosts, the processes running on
+// the nodes outside pods (kubelet, container runtime, system services).
+func EntityRows(v *analysis.View, f Filter, hosts bool) []*analysis.EntityView {
 	var out []*analysis.EntityView
-	for _, e := range v.PodEntities() {
+	for _, e := range v.Entities {
+		switch e.Endpoint.Kind {
+		case analysis.KindPod:
+		case analysis.KindHost:
+			if !hosts {
+				continue
+			}
+		default:
+			continue
+		}
 		if !f.ns(e.Endpoint) || !f.match(e.Endpoint.Display(), e.Endpoint.Workload, e.Endpoint.Node) {
 			continue
 		}
 		out = append(out, e)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Endpoint.Display() < out[j].Endpoint.Display() })
 	sort.SliceStable(out, func(i, j int) bool {
 		var a, b uint64
 		if out[i].Stats.Sched != nil {
@@ -284,8 +316,17 @@ func Pod(w io.Writer, st Style, v *analysis.View, id string) {
 			if c.LastReason != "" {
 				line += fmt.Sprintf("  last exit: %s, %s", analysis.ExplainExit(c.LastExitCode, c.LastReason), analysis.Ago(c.LastFinished))
 			}
-			fmt.Fprintln(w, line)
+			fmt.Fprintln(w, Wrap(st, line, 4))
 		}
+	}
+	if crashes := analysis.CrashesOf(v, id); len(crashes) > 0 {
+		c := crashes[0]
+		Section(w, st, "Last crash")
+		fmt.Fprintln(w, Wrap(st, fmt.Sprintf("  %s %s (%s): %s", st.Crit("crash"), c.Time.Format("15:04:05"), analysis.Ago(c.Time), c.Reason), 4))
+		for _, ev := range c.Events[max(0, len(c.Events)-6):] {
+			fmt.Fprintln(w, Wrap(st, fmt.Sprintf("  %s %s %s", ev.Time.Format("15:04:05.000"), evSev(st, ev.Severity), ev.Message), 17))
+		}
+		Note(w, st, "  resources and all events before the crash: kubectl capybara why-crash "+ep.Display())
 	}
 	s := e.Stats
 	if sc := s.Sched; sc != nil {
@@ -304,7 +345,7 @@ func Pod(w io.Writer, st Style, v *analysis.View, id string) {
 		if sc.ReclaimNs > 0 {
 			fmt.Fprintf(w, "  direct reclaim stalls: %s (%d)\n", analysis.Dur(float64(sc.ReclaimNs)/1e3), sc.ReclaimCount)
 		}
-		fmt.Fprintln(w, st.Dim("  note: 'event loop idle' and 'locks' include idle worker threads; compare against a baseline"))
+		Note(w, st, "  note: 'event loop idle' and 'locks' include idle worker threads; compare against a baseline")
 	}
 	if r := s.Res; r != nil {
 		Section(w, st, "Resources")
@@ -315,7 +356,7 @@ func Pod(w io.Writer, st Style, v *analysis.View, id string) {
 		if r.MemCurrent > 0 || r.MemMax > 0 {
 			fmt.Fprintf(w, "  memory %s  peak %s  OOM kills %d\n", mem, analysis.Bytes(float64(r.MemPeak)), r.OOMKills)
 		} else {
-			fmt.Fprintln(w, st.Dim("  memory: not available (no cgroup v2 memory controller)"))
+			Note(w, st, "  memory: not available (no cgroup v2 memory controller)")
 		}
 		if r.Periods > 0 {
 			fmt.Fprintf(w, "  CPU limit %dm  throttled %s of periods (%s)\n", r.CPUQuotaMilli, analysis.Pct(float64(r.Throttled)/float64(r.Periods)), analysis.Dur(float64(r.ThrottledUs)))
@@ -368,7 +409,11 @@ func Pod(w io.Writer, st Style, v *analysis.View, id string) {
 	}
 	if len(s.DB) > 0 {
 		Section(w, st, "Database calls")
-		DB(w, st, v, Filter{Text: ""}.only(id))
+		DB(w, st, v, Filter{}.only(id), true)
+	}
+	if s.SIP != nil || (s.RTP != nil && s.RTP.PacketsIn+s.RTP.PacketsOut > 0) {
+		Section(w, st, "VoIP")
+		VoIP(w, st, v, Filter{}.only(id))
 	}
 	if len(s.Files) > 0 {
 		Section(w, st, "Slow file operations")
@@ -380,11 +425,23 @@ func Pod(w io.Writer, st Style, v *analysis.View, id string) {
 			fmt.Fprintf(w, "  %s: %d\n", k, s.ConnErrors[k])
 		}
 	}
+	if e.Pod != nil {
+		if rep := analysis.Startup(v, e.Pod); rep.Traced {
+			Section(w, st, "Startup (traced by the agent)")
+			for _, ph := range rep.Phases {
+				fmt.Fprintf(w, "  %-30s %s\n", ph.Name, ph.Duration.Round(time.Millisecond))
+			}
+			for _, a := range rep.Advice {
+				fmt.Fprintln(w, Wrap(st, "  "+st.Accent("→")+" "+a, 4))
+			}
+			Note(w, st, "  full timeline: kubectl capybara startup "+ep.Display())
+		}
+	}
 	evs := v.EventsOf(id)
 	if len(evs) > 0 {
 		Section(w, st, "Recent events")
 		for _, ev := range lastEvents(evs, 15) {
-			fmt.Fprintf(w, "  %s %s %s\n", ev.Time.Format("15:04:05"), evSev(st, ev.Severity), ev.Message)
+			fmt.Fprintln(w, Wrap(st, fmt.Sprintf("  %s %s %s", ev.Time.Format("15:04:05"), evSev(st, ev.Severity), ev.Message), 13))
 		}
 	}
 }
@@ -536,42 +593,128 @@ func DNS(w io.Writer, st Style, v *analysis.View, f Filter) {
 	tn.Render(w, st)
 }
 
-// Nodes prints the noisy-neighbour view.
-func Nodes(w io.Writer, st Style, v *analysis.View, f Filter) {
+// Nodes prints the noisy-neighbour view: a summary line per node, the
+// node-to-node latency matrix and the workloads of each node. With
+// detail > 0 only that many of the busiest nodes get a workload table,
+// unless the filter picks nodes (or workloads) by name.
+func Nodes(w io.Writer, st Style, v *analysis.View, f Filter, detail int) {
+	reports := analysis.NodeReports(v)
+	collectors := func(n *analysis.NodeView) (failed, disabled []string) {
+		for c, s := range n.Collectors {
+			switch {
+			case s == "ok":
+			case strings.HasPrefix(s, "disabled"):
+				disabled = append(disabled, c)
+			default:
+				failed = append(failed, c)
+			}
+		}
+		sort.Strings(failed)
+		sort.Strings(disabled)
+		return
+	}
+	if len(reports) > 1 {
+		t := &Table{Headers: []string{"NODE", "ZONE", "LOAD", "CPU USED", "PSI cpu/mem/io", "CONNTRACK", "DROPS", "RETR/s", "DISK/s", "COLLECTORS"},
+			Right: map[int]bool{2: true, 3: true, 5: true, 6: true, 7: true, 8: true}, MaxCol: 40}
+		for _, r := range reports {
+			n := r.Node
+			load := fmt.Sprintf("%.1f/%d", n.Stats.Load1, n.Stats.CPUs)
+			if n.Stats.CPUs > 0 && n.Stats.Load1 > float64(n.Stats.CPUs) {
+				load = st.Warn(load)
+			}
+			ct := "-"
+			if n.Stats.ConntrackMax > 0 {
+				share := float64(n.Stats.ConntrackCount) / float64(n.Stats.ConntrackMax)
+				ct = analysis.Pct(share)
+				if share > 0.8 {
+					ct = st.Warn(ct)
+				}
+			}
+			status := st.OK("ok")
+			if failed, _ := collectors(n); len(failed) > 0 {
+				status = st.Warn("failed: " + strings.Join(failed, ", "))
+			}
+			t.AddRow(n.Name, orDash(n.Zone), load, fmt.Sprintf("%.2f", r.CPUCores),
+				fmt.Sprintf("%.0f/%.0f/%.0f%%", n.Stats.PSICPU, n.Stats.PSIMem, n.Stats.PSIIO), ct, fmt.Sprint(r.Drops),
+				analysis.Rate(v.PerSec(r.Retrans)), analysis.Bytes(v.PerSec(r.DiskBytes)), status)
+		}
+		t.Render(w, st)
+		Note(w, st, "LOAD = load average / CPUs; CPU USED = cores used by pods and host processes; PSI = share of time some task was stalled (10s average)")
+	}
 	if m := analysis.BuildNodeMatrix(v); len(m.Nodes) > 1 {
 		Section(w, st, "Node-to-node latency")
 		NodeHeatmap(w, st, v)
-		fmt.Fprintln(w)
 	}
-	for _, r := range analysis.NodeReports(v) {
+	// which nodes get a workload table
+	nodeMatch := map[string]bool{}
+	var shown []analysis.NodeReport
+	for _, r := range reports {
+		if f.Text == "" {
+			shown = append(shown, r)
+			continue
+		}
+		if f.match(r.Node.Name) {
+			nodeMatch[r.Node.Name] = true
+			shown = append(shown, r)
+			continue
+		}
+		for _, e := range r.Entities {
+			if f.match(e.Endpoint.Display()) {
+				shown = append(shown, r)
+				break
+			}
+		}
+	}
+	hidden := 0
+	if detail > 0 && f.Text == "" && len(shown) > detail {
+		sort.SliceStable(shown, func(i, j int) bool {
+			a, b := shown[i].Node.Stats, shown[j].Node.Stats
+			return a.Load1/float64(max(a.CPUs, 1)) > b.Load1/float64(max(b.CPUs, 1))
+		})
+		hidden = len(shown) - detail
+		shown = shown[:detail]
+	}
+	if len(shown) > 0 {
+		Section(w, st, "Workloads per node")
+	}
+	for _, r := range shown {
 		n := r.Node
 		ct := "-"
 		if n.Stats.ConntrackMax > 0 {
 			ct = fmt.Sprintf("%d/%d (%s)", n.Stats.ConntrackCount, n.Stats.ConntrackMax, analysis.Pct(float64(n.Stats.ConntrackCount)/float64(n.Stats.ConntrackMax)))
 		}
-		fmt.Fprintf(w, "%s  zone %s  load %.2f/%d cpus  pods+host using %.2f cores  psi cpu %.1f%% mem %.1f%% io %.1f%%\n",
-			st.Title("node/"+n.Name), orDash(n.Zone), n.Stats.Load1, n.Stats.CPUs, r.CPUCores, n.Stats.PSICPU, n.Stats.PSIMem, n.Stats.PSIIO)
-		fmt.Fprintf(w, "  conntrack %s  insert_failed %d  drops %d  retransmits %s/s  disk %s/s\n",
-			ct, n.Stats.ConntrackInsertFailed, r.Drops, analysis.Rate(v.PerSec(r.Retrans)), analysis.Bytes(v.PerSec(r.DiskBytes)))
-		for name, nic := range n.Stats.NICs {
-			fmt.Fprintf(w, "  nic %s rx %s/s tx %s/s  errors %d/%d  dropped %d/%d  missed %d\n", name,
-				analysis.Bytes(v.PerSec(nic.RxBytes)), analysis.Bytes(v.PerSec(nic.TxBytes)), nic.RxErrors, nic.TxErrors, nic.RxDropped, nic.TxDropped, nic.RxMissed)
+		if len(reports) > 1 {
+			// the summary table above has the rest
+			fmt.Fprintln(w, Wrap(st, fmt.Sprintf("%s  conntrack %s  insert_failed %d", st.Title("node/"+n.Name), ct, n.Stats.ConntrackInsertFailed), 2))
+		} else {
+			fmt.Fprintln(w, Wrap(st, fmt.Sprintf("%s  zone %s  load %.2f/%d cpus  pods+host using %.2f cores  psi cpu %.1f%% mem %.1f%% io %.1f%%",
+				st.Title("node/"+n.Name), orDash(n.Zone), n.Stats.Load1, n.Stats.CPUs, r.CPUCores, n.Stats.PSICPU, n.Stats.PSIMem, n.Stats.PSIIO), 2))
+			fmt.Fprintln(w, Wrap(st, fmt.Sprintf("  conntrack %s  insert_failed %d  drops %d  retransmits %s/s  disk %s/s",
+				ct, n.Stats.ConntrackInsertFailed, r.Drops, analysis.Rate(v.PerSec(r.Retrans)), analysis.Bytes(v.PerSec(r.DiskBytes))), 4))
+		}
+		nics := make([]string, 0, len(n.Stats.NICs))
+		for name := range n.Stats.NICs {
+			nics = append(nics, name)
+		}
+		sort.Strings(nics)
+		for _, name := range nics {
+			nic := n.Stats.NICs[name]
+			fmt.Fprintln(w, Wrap(st, fmt.Sprintf("  nic %s rx %s/s tx %s/s  errors %d/%d  dropped %d/%d  missed %d", name,
+				analysis.Bytes(v.PerSec(nic.RxBytes)), analysis.Bytes(v.PerSec(nic.TxBytes)), nic.RxErrors, nic.TxErrors, nic.RxDropped, nic.TxDropped, nic.RxMissed), 4))
 		}
 		if n.Stats.SoftnetDropped+n.Stats.SoftnetSqueezed > 0 || n.Stats.NetRxTopShare > 0 {
-			fmt.Fprintf(w, "  softnet dropped %d  squeezed %d  NET_RX on busiest CPU %s (cpu %d)\n",
-				n.Stats.SoftnetDropped, n.Stats.SoftnetSqueezed, analysis.Pct(n.Stats.NetRxTopShare), n.Stats.NetRxCPU)
+			fmt.Fprintln(w, Wrap(st, fmt.Sprintf("  softnet dropped %d  squeezed %d  NET_RX on busiest CPU %s (cpu %d)",
+				n.Stats.SoftnetDropped, n.Stats.SoftnetSqueezed, analysis.Pct(n.Stats.NetRxTopShare), n.Stats.NetRxCPU), 4))
 		}
-		t := &Table{Headers: []string{"  WORKLOAD", "CPU", "RUNQ p99", "WAITING FOR CPU", "DELAY CAUSED TO OTHERS", "DISK/s", "DISK p99", "NET/s"},
+		t := &Table{Headers: []string{"  WORKLOAD", "CPU", "RUNQ p99", "WAIT CPU", "DELAY TO OTHERS", "DISK/s", "DISK p99", "NET/s"},
 			Right: map[int]bool{1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 7: true}, MaxCol: 50}
-		shown := 0
 		for _, e := range r.Entities {
-			if !f.match(e.Endpoint.Display()) {
+			if f.Text != "" && !nodeMatch[n.Name] && !f.match(e.Endpoint.Display()) {
 				continue
 			}
-			if shown >= 12 {
+			if len(t.Rows) >= 12 {
 				break
 			}
-			shown++
 			wait := analysis.Pct(e.RunQShare)
 			if e.RunQShare > 0.2 {
 				wait = st.Warn(wait)
@@ -580,17 +723,17 @@ func Nodes(w io.Writer, st Style, v *analysis.View, f Filter) {
 				analysis.Dur(float64(e.Stolen)/1e3), analysis.Bytes(v.PerSec(e.DiskBytes)), analysis.Dur(e.DiskP99), analysis.Bytes(v.PerSec(e.NetBytes)))
 		}
 		t.Render(w, st)
-		var bad []string
-		for c, s := range n.Collectors {
-			if s != "ok" {
-				bad = append(bad, c)
-			}
+		failed, disabled := collectors(n)
+		if len(failed) > 0 {
+			fmt.Fprintln(w, Wrap(st, "  "+st.Warn("collectors that failed to start: "+strings.Join(failed, ", ")), 4))
 		}
-		sort.Strings(bad)
-		if len(bad) > 0 {
-			fmt.Fprintf(w, "  %s\n", st.Dim("collectors not running: "+strings.Join(bad, ", ")))
+		if len(disabled) > 0 {
+			Note(w, st, "  collectors switched off: "+strings.Join(disabled, ", "))
 		}
 		fmt.Fprintln(w)
+	}
+	if hidden > 0 {
+		Note(w, st, fmt.Sprintf("workloads of the %d busiest nodes are shown; filter by a node or pod name to see the other %d", len(shown), hidden))
 	}
 	if len(v.Drops) > 0 {
 		Section(w, st, "Packet drops by reason")
@@ -630,44 +773,82 @@ func Nodes(w io.Writer, st Style, v *analysis.View, f Filter) {
 	}
 }
 
-// HTTP prints all HTTP endpoints.
-func HTTP(w io.Writer, st Style, v *analysis.View, f Filter) {
-	t := &Table{Headers: []string{"POD", "ROLE", "METHOD", "PATH", "RPS", "5xx", "4xx", "p50", "p99"},
-		Right: map[int]bool{4: true, 5: true, 6: true, 7: true, 8: true}, MaxCol: 50}
+// HTTP prints HTTP routes ranked by request count. Replicas of a workload
+// serve the same routes, so their rows are merged unless perPod is set
+// (outlier replicas are reported separately).
+func HTTP(w io.Writer, st Style, v *analysis.View, f Filter, perPod bool) {
 	type row struct {
-		e  *analysis.EntityView
-		ep *model.HTTPEndpoint
+		name string
+		ep   *model.HTTPEndpoint
+		pods map[string]bool
 	}
-	var rows []row
+	by := map[string]*row{}
+	var rows []*row
 	for _, e := range v.Entities {
 		if !f.ns(e.Endpoint) {
 			continue
 		}
+		name := e.Endpoint.WorkloadKey()
+		if perPod {
+			name = e.Endpoint.Display()
+		}
 		for _, ep := range e.Stats.HTTP {
-			if f.match(e.Endpoint.Display(), ep.Path, ep.Method) {
-				rows = append(rows, row{e, ep})
+			if !f.match(name, e.Endpoint.Display(), ep.Path, ep.Method) {
+				continue
 			}
+			k := name + "\x00" + ep.Role + " " + ep.Method + " " + ep.Path
+			r, ok := by[k]
+			if !ok {
+				r = &row{name: name, ep: &model.HTTPEndpoint{Role: ep.Role, Method: ep.Method, Path: ep.Path}, pods: map[string]bool{}}
+				by[k] = r
+				rows = append(rows, r)
+			}
+			r.ep.Merge(ep)
+			r.pods[e.ID] = true
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ep.Count > rows[j].ep.Count })
+	if len(rows) == 0 {
+		Note(w, st, "no HTTP/1.x traffic observed (the http collector is opt-in: run the agent with --l7; TLS traffic is not visible)")
+		return
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].ep.Count != rows[j].ep.Count {
+			return rows[i].ep.Count > rows[j].ep.Count
+		}
+		return rows[i].name+rows[i].ep.Role < rows[j].name+rows[j].ep.Role
+	})
+	t := &Table{Headers: []string{"WORKLOAD", "PODS", "ROLE", "METHOD", "PATH", "RPS", "5xx", "4xx", "p50", "p99"},
+		Right: map[int]bool{1: true, 5: true, 6: true, 7: true, 8: true, 9: true}, MaxCol: 50}
+	if perPod {
+		t.Headers[0] = "POD"
+	}
 	for _, r := range rows {
 		ep := r.ep
 		e5 := analysis.Pct(float64(ep.Status["5xx"]) / float64(ep.Count))
 		if ep.Status["5xx"] > 0 {
 			e5 = st.Warn(e5)
 		}
-		t.AddRow(r.e.Endpoint.Display(), ep.Role, ep.Method, ep.Path, analysis.Rate(v.PerSec(ep.Count)), e5,
+		t.AddRow(r.name, fmt.Sprint(len(r.pods)), ep.Role, ep.Method, ep.Path, analysis.Rate(v.PerSec(ep.Count)), e5,
 			analysis.Pct(float64(ep.Status["4xx"])/float64(ep.Count)), analysis.Dur(ep.Lat.P50()), analysis.Dur(ep.Lat.P99()))
 	}
-	if len(rows) == 0 {
-		fmt.Fprintln(w, st.Dim("no HTTP/1.x traffic observed (the http collector is opt-in: run the agent with --l7; TLS traffic is not visible)"))
-		return
+	if perPod {
+		t.dropColumn(1)
 	}
 	t.Render(w, st)
 }
 
 // Events prints the event log.
 func Events(w io.Writer, st Style, v *analysis.View, f Filter, types map[string]bool, limit int) {
+	events(w, st, v, f, types, limit, false)
+}
+
+// EventsNewestFirst prints the same events with the latest on top, for a
+// screen that opens at its first line.
+func EventsNewestFirst(w io.Writer, st Style, v *analysis.View, f Filter, types map[string]bool, limit int) {
+	events(w, st, v, f, types, limit, true)
+}
+
+func events(w io.Writer, st Style, v *analysis.View, f Filter, types map[string]bool, limit int, newestFirst bool) {
 	var evs []analysis.EventView
 	for _, e := range v.Events {
 		if len(types) > 0 && !types[e.Type] {
@@ -681,11 +862,21 @@ func Events(w io.Writer, st Style, v *analysis.View, f Filter, types map[string]
 	if limit > 0 && len(evs) > limit {
 		evs = evs[len(evs)-limit:]
 	}
+	if newestFirst {
+		for i, j := 0, len(evs)-1; i < j; i, j = i+1, j-1 {
+			evs[i], evs[j] = evs[j], evs[i]
+		}
+	}
+	podW := 40
+	if st.Width > 0 && st.Width < 130 {
+		podW = 26
+	}
 	for _, e := range evs {
-		fmt.Fprintf(w, "%s %s %-16s %-40s %s\n", e.Time.Format("15:04:05.000"), evSev(st, e.Severity), e.Type, truncate(e.Endpoint.Display(), 40), e.Message)
+		prefix := fmt.Sprintf("%s %s %-16s %-*s ", e.Time.Format("15:04:05.000"), evSev(st, e.Severity), e.Type, podW, truncate(e.Endpoint.Display(), podW))
+		fmt.Fprintln(w, WrapPrefix(st, prefix, e.Message))
 	}
 	if len(evs) == 0 {
-		fmt.Fprintln(w, st.Dim("no events"))
+		Note(w, st, "no events")
 	}
 }
 
@@ -696,7 +887,7 @@ func Security(w io.Writer, st Style, v *analysis.View, f Filter) {
 	Section(w, st, "Undeclared listening ports")
 	und := analysis.UndeclaredPorts(v)
 	if len(und) == 0 {
-		fmt.Fprintln(w, st.Dim("none"))
+		Note(w, st, "none")
 	}
 	for _, u := range und {
 		fmt.Fprintf(w, "  %s listens on %s:%d (%s)\n", u.Endpoint.Display(), u.Addr, u.Port, u.Comm)
@@ -706,7 +897,7 @@ func Security(w io.Writer, st Style, v *analysis.View, f Filter) {
 	Section(w, st, "Internet egress")
 	ext := analysis.ExternalEgress(v)
 	if len(ext) == 0 {
-		fmt.Fprintln(w, st.Dim("none"))
+		Note(w, st, "none")
 	}
 	for _, x := range ext {
 		if !f.match(x.Workload) {
@@ -722,18 +913,22 @@ func Security(w io.Writer, st Style, v *analysis.View, f Filter) {
 }
 
 // Cost prints the cross-zone cost report.
-func Cost(w io.Writer, st Style, v *analysis.View) {
+func Cost(w io.Writer, st Style, v *analysis.View, f Filter) {
 	Section(w, st, "Rightsizing")
-	Rightsize(w, st, v, Filter{}, analysis.DefaultPricing)
+	Rightsize(w, st, v, f, analysis.DefaultPricing)
 	Section(w, st, "Cross-zone traffic")
 	costs := analysis.CrossZoneCosts(v)
 	if len(costs) == 0 {
-		fmt.Fprintln(w, st.Dim("no cross-zone traffic observed (nodes need topology.kubernetes.io/zone labels)"))
+		Note(w, st, "no cross-zone traffic observed (nodes need topology.kubernetes.io/zone labels)")
 		return
 	}
 	var total float64
 	t := &Table{Headers: []string{"CLIENT", "SERVER", "ZONES", "BYTES/s", "≈ $/MONTH"}, Right: map[int]bool{3: true, 4: true}}
+	inNS := func(workload string) bool { return f.Namespace == "" || strings.HasPrefix(workload, f.Namespace+"/") }
 	for _, c := range costs {
+		if !f.match(c.Client, c.Server) || !(inNS(c.Client) || inNS(c.Server)) {
+			continue
+		}
 		total += c.MonthlyUSD
 		t.AddRow(c.Client, c.Server, c.ClientZone+" → "+c.ServerZone, analysis.Bytes(c.BytesPerSec), analysis.Money(c.MonthlyUSD))
 	}
@@ -841,7 +1036,7 @@ func Crashes(w io.Writer, st Style, v *analysis.View, id string) {
 		}
 	}
 	if len(crashes) == 0 {
-		fmt.Fprintln(w, st.Dim("no crash recorded by the flight recorder in this window (try a longer --window)"))
+		Note(w, st, "no crash recorded by the flight recorder in this window (try a longer --window)")
 		return
 	}
 	for i, c := range crashes {
@@ -881,7 +1076,7 @@ func Crashes(w io.Writer, st Style, v *analysis.View, id string) {
 func Profile(w io.Writer, st Style, p *model.Profile, n int) {
 	fmt.Fprintf(w, "%s %s on %s: %d samples in %s at %dHz\n\n", st.Title("profile"), p.Entity, p.Node, p.Samples, p.Duration, p.Hz)
 	if p.Samples == 0 {
-		fmt.Fprintln(w, st.Dim("no samples: the pod did not use CPU during the profile"))
+		Note(w, st, "no samples: the pod did not use CPU during the profile")
 		return
 	}
 	t := &Table{Headers: []string{"SELF", "SELF%", "TOTAL", "TOTAL%", "FUNCTION"}, Right: map[int]bool{0: true, 1: true, 2: true, 3: true}, MaxCol: 100}

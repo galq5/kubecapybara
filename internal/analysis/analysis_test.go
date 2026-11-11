@@ -250,3 +250,20 @@ func TestRegressions(t *testing.T) {
 		t.Fatalf("expected RTT regression, got %+v", fs)
 	}
 }
+
+// After a restart Kubernetes reports the start of the new container, which
+// is later than the traced first start: no phase may be negative.
+func TestStartupPhasesAfterRestart(t *testing.T) {
+	snaps, meta := fixture(t)
+	pod := meta.Pods["pay-new"]
+	pod.Containers[0].StartedAt = time.Now().Add(-10 * time.Second) // restarted long after it first listened
+	rep := Startup(Build(snaps, meta, Options{}), pod)
+	if !rep.Traced || len(rep.Phases) == 0 {
+		t.Fatalf("no startup trace: %+v", rep)
+	}
+	for _, ph := range rep.Phases {
+		if ph.Duration < 0 {
+			t.Errorf("phase %q is negative: %s", ph.Name, ph.Duration)
+		}
+	}
+}

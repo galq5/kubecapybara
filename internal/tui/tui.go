@@ -44,10 +44,37 @@ type Options struct {
 	Window    time.Duration
 }
 
-var tabs = []string{"Overview", "Network", "Pods", "Services", "DNS", "HTTP", "Nodes", "Events", "Security", "Cost"}
+// Tab names. The first ten are always shown and reached with 1-9 and 0;
+// VoIP only appears when SIP or RTP traffic was observed (key v).
+const (
+	tabOverview = "Overview"
+	tabNetwork  = "Network"
+	tabPods     = "Pods"
+	tabServices = "Services"
+	tabDNS      = "DNS"
+	tabApps     = "Apps"
+	tabNodes    = "Nodes"
+	tabEvents   = "Events"
+	tabSecurity = "Security"
+	tabCost     = "Cost"
+	tabVoIP     = "VoIP"
+)
 
-// TabIndex returns the index of a tab by name (-1 if unknown).
+var tabs = []string{tabOverview, tabNetwork, tabPods, tabServices, tabDNS, tabApps, tabNodes, tabEvents, tabSecurity, tabCost, tabVoIP}
+
+// shorter labels for terminals too narrow for the full tab bar
+var shortTabs = map[string]string{
+	tabOverview: "Over", tabNetwork: "Net", tabPods: "Pods", tabServices: "Svc", tabDNS: "DNS", tabApps: "Apps",
+	tabNodes: "Node", tabEvents: "Evts", tabSecurity: "Sec", tabCost: "Cost", tabVoIP: "VoIP",
+}
+
+// TabIndex returns the index of a tab by name (-1 if unknown). "HTTP" is
+// accepted for the Apps tab, which holds HTTP routes, database statements
+// and slow files.
 func TabIndex(name string) int {
+	if strings.EqualFold(name, "HTTP") {
+		name = tabApps
+	}
 	for i, t := range tabs {
 		if strings.EqualFold(t, name) {
 			return i
@@ -59,13 +86,21 @@ func TabIndex(name string) int {
 // sort orders of the interactive tables
 var (
 	edgeSorts = []string{"traffic", "rtt", "connect", "errors", "retrans", "bytes", "conns"}
-	podSorts  = []string{"cpu", "runq", "memory", "dns", "http", "name"}
+	podSorts  = []string{"cpu", "runq", "memory", "oom", "dns", "http", "name"}
 )
+
+// overviewDetails is how many evidence lines a finding shows on the
+// Overview tab until it is selected.
+const overviewDetails = 3
+
+// nodeDetails is how many nodes get a workload table on the Nodes tab
+// without a filter.
+const nodeDetails = 3
 
 // ---------------------------------------------------------------- keys
 
 type keyMap struct {
-	Next, Prev, Jump, Up, Down, Enter, Back, Filter, Sort, Refresh, Help, Quit key.Binding
+	Next, Prev, Jump, VoIP, Up, Down, Enter, Back, Filter, Sort, Hosts, Left, Right, Refresh, Help, Quit key.Binding
 }
 
 func newKeys() keyMap {
@@ -73,24 +108,30 @@ func newKeys() keyMap {
 		Next:    key.NewBinding(key.WithKeys("tab", "right", "l"), key.WithHelp("tab/→", "next tab")),
 		Prev:    key.NewBinding(key.WithKeys("shift+tab", "left", "h"), key.WithHelp("⇧tab/←", "prev tab")),
 		Jump:    key.NewBinding(key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"), key.WithHelp("1-0", "jump to tab")),
+		VoIP:    key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "VoIP tab")),
 		Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		Enter:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "details")),
 		Back:    key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back / clear filter")),
 		Filter:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 		Sort:    key.NewBinding(key.WithKeys("s", "S"), key.WithHelp("s/S", "sort")),
+		Hosts:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "host processes")),
+		Left:    key.NewBinding(key.WithKeys("<", ","), key.WithHelp("</>", "scroll sideways")),
+		Right:   key.NewBinding(key.WithKeys(">", ".")),
 		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
+// ShortHelp lists the keys that do something on the current tab (bindings
+// that do not apply are disabled and left out by the help bubble).
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Next, k.Jump, k.Enter, k.Filter, k.Sort, k.Refresh, k.Help, k.Quit}
+	return []key.Binding{k.Next, k.Jump, k.Enter, k.Filter, k.Sort, k.Hosts, k.Left, k.Refresh, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Next, k.Prev, k.Jump}, {k.Up, k.Down, k.Enter, k.Back}, {k.Filter, k.Sort, k.Refresh}, {k.Help, k.Quit}}
+	return [][]key.Binding{{k.Next, k.Prev, k.Jump, k.VoIP}, {k.Up, k.Down, k.Enter, k.Back}, {k.Filter, k.Sort, k.Hosts, k.Left}, {k.Refresh, k.Help, k.Quit}}
 }
 
 // ---------------------------------------------------------------- model
@@ -114,19 +155,28 @@ type model struct {
 	keys keyMap
 	help help.Model
 
-	tab       int
+	tab       string
 	vp        viewport.Model
 	tbl       table.Model
 	rowIDs    []string // item id per table row
-	edges     map[string]*analysis.Edge
 	ready     bool
 	width     int
 	height    int
 	filter    textinput.Model
 	filtering bool
-	sortIdx   map[int]int // tab -> sort index
-	detail    string      // pod entity id or edge key being inspected
-	selected  map[int]string
+	sortIdx   map[string]int // tab -> sort index
+	detail    string         // pod entity id or edge key being inspected
+	back      string         // tab to return to when the detail is closed
+	selected  map[string]string
+	showHosts bool              // Pods tab: include processes outside pods
+	voip      bool              // the data has SIP or RTP traffic
+	byName    map[string]string // display name -> entity id
+
+	// Overview: the findings shown, the selected one and where each starts
+	findings   []analysis.Finding
+	findCursor int
+	findKey    string
+	findLines  [][2]int // first line and line count of each finding
 }
 
 func newModel(load Loader, opts Options) *model {
@@ -140,8 +190,8 @@ func newModel(load Loader, opts Options) *model {
 	t.SetStyles(s)
 	h := help.New()
 	return &model{
-		load: load, opts: opts, st: render.Style{Color: true}, filter: ti, loading: true,
-		keys: newKeys(), help: h, tbl: t, sortIdx: map[int]int{}, selected: map[int]string{},
+		load: load, opts: opts, st: render.Style{Color: true}, filter: ti, loading: true, tab: tabOverview,
+		keys: newKeys(), help: h, tbl: t, sortIdx: map[string]int{}, selected: map[string]string{},
 	}
 }
 
@@ -168,8 +218,54 @@ func (m *model) fetch() tea.Cmd {
 	}
 }
 
+// setResult installs fresh data.
+func (m *model) setResult(res *Result) {
+	m.res, m.updated = res, time.Now()
+	m.voip = false
+	m.byName = make(map[string]string, len(res.View.Entities))
+	for id, e := range res.View.Entities {
+		m.byName[e.Endpoint.Display()] = id
+	}
+	for _, e := range res.View.Entities {
+		if e.Stats.SIP != nil || (e.Stats.RTP != nil && e.Stats.RTP.PacketsIn+e.Stats.RTP.PacketsOut > 0) {
+			m.voip = true
+			break
+		}
+	}
+	if m.tab == tabVoIP && !m.voip {
+		m.tab = tabOverview
+	}
+}
+
+// hasVoIP reports whether any entity has SIP or RTP traffic.
+func (m *model) hasVoIP() bool { return m.res != nil && m.voip }
+
+// visible returns the tabs currently shown.
+func (m *model) visible() []string {
+	if m.hasVoIP() || m.tab == tabVoIP {
+		return tabs
+	}
+	return tabs[:len(tabs)-1]
+}
+
 func (m *model) tableTab() bool {
-	return m.detail == "" && (tabs[m.tab] == "Network" || tabs[m.tab] == "Pods")
+	return m.detail == "" && (m.tab == tabNetwork || m.tab == tabPods)
+}
+
+// findingList reports whether the selectable list of findings is shown.
+func (m *model) findingList() bool {
+	return m.detail == "" && m.tab == tabOverview && m.res != nil
+}
+
+// syncKeys enables the bindings that apply to what is on screen, so the
+// footer only advertises keys that do something.
+func (m *model) syncKeys() {
+	m.keys.Sort.SetEnabled(m.tableTab())
+	m.keys.Hosts.SetEnabled(m.tableTab() && m.tab == tabPods)
+	m.keys.Enter.SetEnabled(m.tableTab() || (m.findingList() && m.findingTarget() != ""))
+	m.keys.Left.SetEnabled(!m.tableTab())
+	m.keys.Right.SetEnabled(!m.tableTab())
+	m.keys.VoIP.SetEnabled(m.hasVoIP())
 }
 
 func (m *model) contentHeight() int {
@@ -185,12 +281,14 @@ func (m *model) contentHeight() int {
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	m.syncKeys()
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m.help.Width = msg.Width
 		if !m.ready {
 			m.vp = viewport.New(msg.Width, m.contentHeight())
+			m.vp.SetHorizontalStep(0) // sideways scrolling is on < and >: ←/→ switch tabs
 			m.ready = true
 		}
 		m.resize()
@@ -204,9 +302,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case loadedMsg:
 		m.loading = false
 		m.err = msg.err
-		if msg.err == nil {
-			m.res = msg.res
-			m.updated = time.Now()
+		if msg.err == nil && msg.res != nil {
+			m.setResult(msg.res)
 		}
 		m.refresh(false)
 	case tea.KeyMsg:
@@ -235,28 +332,37 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resize()
 			m.refresh(false)
 		case key.Matches(msg, m.keys.Next):
-			m.switchTab((m.tab + 1) % len(tabs))
+			m.step(1)
 		case key.Matches(msg, m.keys.Prev):
-			m.switchTab((m.tab + len(tabs) - 1) % len(tabs))
+			m.step(-1)
 		case key.Matches(msg, m.keys.Jump):
 			i := int(msg.String()[0] - '1')
 			if msg.String() == "0" {
 				i = 9
 			}
-			m.switchTab(i)
+			if vis := m.visible(); i >= 0 && i < len(vis) {
+				m.switchTab(vis[i])
+			}
+		case key.Matches(msg, m.keys.VoIP):
+			m.switchTab(tabVoIP)
 		case key.Matches(msg, m.keys.Filter):
 			m.filtering = true
 			m.filter.Focus()
 		case key.Matches(msg, m.keys.Back):
-			if m.detail != "" {
+			switch {
+			case m.detail != "":
 				m.detail = ""
-			} else {
+				if m.back != "" {
+					m.tab, m.back = m.back, ""
+				}
+			default:
 				m.filter.SetValue("")
 			}
 			m.refresh(true)
+			m.showFinding()
 		case key.Matches(msg, m.keys.Sort):
 			n := len(edgeSorts)
-			if tabs[m.tab] == "Pods" {
+			if m.tab == tabPods {
 				n = len(podSorts)
 			}
 			step := 1
@@ -265,6 +371,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.sortIdx[m.tab] = (m.sortIdx[m.tab] + step) % n
 			m.refresh(false)
+		case key.Matches(msg, m.keys.Hosts):
+			m.showHosts = !m.showHosts
+			m.refresh(false)
+		case key.Matches(msg, m.keys.Left):
+			m.vp.ScrollLeft(8)
+		case key.Matches(msg, m.keys.Right):
+			m.vp.ScrollRight(8)
 		case key.Matches(msg, m.keys.Refresh):
 			if !m.loading {
 				m.loading = true
@@ -275,6 +388,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detail = m.rowIDs[c]
 				m.refresh(true)
 			}
+		case key.Matches(msg, m.keys.Enter) && m.findingList():
+			if id := m.findingTarget(); id != "" {
+				m.back, m.tab, m.detail = tabOverview, tabPods, id
+				m.refresh(true)
+			}
+		case m.findingList() && (key.Matches(msg, m.keys.Up) || key.Matches(msg, m.keys.Down)):
+			if key.Matches(msg, m.keys.Up) {
+				m.findCursor--
+			} else {
+				m.findCursor++
+			}
+			m.findKey = ""
+			m.refresh(false)
+			m.showFinding()
 		default:
 			if m.tableTab() {
 				var cmd tea.Cmd
@@ -303,23 +430,42 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	}
+	m.syncKeys()
 	return m, tea.Batch(cmds...)
 }
 
 func (m *model) resize() {
 	h := m.contentHeight()
+	m.st.Width = m.width
 	m.vp.Width, m.vp.Height = m.width, h
 	m.tbl.SetWidth(m.width)
 	m.tbl.SetHeight(h - 1) // one line for the sort hint
 }
 
-func (m *model) switchTab(i int) {
-	if i < 0 || i >= len(tabs) {
+// step moves to the next or previous visible tab.
+func (m *model) step(d int) {
+	vis := m.visible()
+	for i, t := range vis {
+		if t == m.tab {
+			m.switchTab(vis[(i+d+len(vis))%len(vis)])
+			return
+		}
+	}
+	m.switchTab(vis[0])
+}
+
+func (m *model) switchTab(name string) {
+	ok := false
+	for _, t := range m.visible() {
+		ok = ok || t == name
+	}
+	if !ok {
 		return
 	}
-	m.tab = i
-	m.detail = ""
+	m.tab = name
+	m.detail, m.back = "", ""
 	m.refresh(true)
+	m.showFinding()
 }
 
 // refresh rebuilds the content of the current tab.
@@ -343,6 +489,7 @@ func (m *model) refresh(resetScroll bool) {
 	m.vp.SetContent(b.String())
 	if resetScroll {
 		m.vp.GotoTop()
+		m.vp.SetXOffset(0)
 	}
 }
 
@@ -358,28 +505,26 @@ func edgeKey(e *analysis.Edge) string {
 
 func (m *model) buildTable() {
 	v := m.res.View
-	var cols []table.Column
+	var specs []colSpec
 	var rows []table.Row
 	m.rowIDs = m.rowIDs[:0]
-	switch tabs[m.tab] {
-	case "Network":
-		m.edges = map[string]*analysis.Edge{}
+	switch m.tab {
+	case tabNetwork:
 		edges := render.FilterEdges(v, m.filt())
 		render.SortEdges(edges, edgeSorts[m.sortIdx[m.tab]])
-		cols = fitColumns(m.width, []colSpec{
-			{"CLIENT", 30, true}, {"SERVER", 30, true}, {"PORT", 5, false}, {"RTT p50", 8, false}, {"RTT p99", 8, false},
-			{"CONN p99", 8, false}, {"CONN/s", 7, false}, {"TX/s", 9, false}, {"RX/s", 9, false}, {"RETR/s", 7, false},
-			{"REFUSED", 7, false}, {"TIMEOUT", 7, false}, {"SEEN", 6, false},
-		})
+		// prio: what stays on a narrow terminal (errors before volumes)
+		specs = []colSpec{
+			{"CLIENT", 30, true, 99}, {"SERVER", 30, true, 99}, {"PORT", 5, false, 11}, {"RTT p50", 8, false, 2}, {"RTT p99", 8, false, 10},
+			{"CONN p99", 8, false, 5}, {"CONN/s", 7, false, 6}, {"TX/s", 9, false, 3}, {"RX/s", 9, false, 4}, {"RETR/s", 7, false, 7},
+			{"REFUSED", 7, false, 9}, {"TIMEOUT", 7, false, 8}, {"SEEN", 6, false, 1},
+		}
 		for _, e := range edges {
 			s := e.Stats
 			server := e.Server.Display()
 			if e.CrossZone {
 				server += " ⇄"
 			}
-			k := edgeKey(e)
-			m.edges[k] = e
-			m.rowIDs = append(m.rowIDs, k)
+			m.rowIDs = append(m.rowIDs, edgeKey(e))
 			rows = append(rows, table.Row{
 				e.Client.Display(), server, strconv.Itoa(int(e.Port)),
 				analysis.Dur(s.RTT.P50()), analysis.Dur(s.RTT.P99()), analysis.Dur(s.Connect.P99()),
@@ -387,18 +532,18 @@ func (m *model) buildTable() {
 				analysis.Rate(v.PerSec(s.Retrans)), warnNum(s.Refused), warnNum(s.Timeouts), e.Side,
 			})
 		}
-	case "Pods":
-		pods := render.PodRows(v, m.filt())
-		sortPods(v, pods, podSorts[m.sortIdx[m.tab]])
+	case tabPods:
+		pods := render.EntityRows(v, m.filt(), m.showHosts)
 		oom := map[string]time.Duration{}
 		for _, r := range analysis.OOMRisks(v) {
 			oom[r.Endpoint.ID] = r.ETA
 		}
-		cols = fitColumns(m.width, []colSpec{
-			{"POD", 40, true}, {"NODE", 14, true}, {"CPU", 6, false}, {"CPU TREND", 12, false}, {"RUNQ p99", 8, false},
-			{"WAIT CPU", 8, false}, {"MEM", 9, false}, {"MEM%", 5, false}, {"OOM IN", 7, false}, {"THROTTLE", 8, false},
-			{"DNS err", 7, false}, {"HTTP rps", 8, false}, {"5xx", 5, false},
-		})
+		sortPods(pods, podSorts[m.sortIdx[m.tab]], oom)
+		specs = []colSpec{
+			{"POD", 40, true, 99}, {"NODE", 14, false, 4}, {"CPU", 6, false, 12}, {"CPU TREND", 12, false, 1}, {"RUNQ p99", 8, false, 5},
+			{"WAIT CPU", 8, false, 10}, {"MEM", 9, false, 2}, {"MEM%", 5, false, 11}, {"OOM IN", 7, false, 7}, {"THROTTLE", 8, false, 8},
+			{"DNS err", 7, false, 6}, {"HTTP rps", 8, false, 3}, {"5xx", 5, false, 9},
+		}
 		for _, e := range pods {
 			s := e.Stats
 			cpu, runq, wait := "-", "-", "-"
@@ -446,9 +591,28 @@ func (m *model) buildTable() {
 			rows = append(rows, table.Row{e.Endpoint.Display(), e.Endpoint.Node, cpu, trend, runq, wait, mem, memPct, oomIn, thr, dnsErr, rps, e5})
 		}
 	}
+	cols, kept := fitColumns(m.width, specs)
+	for r, row := range rows {
+		cells := make(table.Row, len(kept))
+		for i, c := range kept {
+			cell := row[c]
+			if specs[c].flex {
+				// names keep their end: replicas differ only in the suffix
+				mark := ""
+				if strings.HasSuffix(cell, " ⇄") {
+					cell, mark = strings.TrimSuffix(cell, " ⇄"), " ⇄"
+				}
+				cell = render.Truncate(cell, cols[i].Width-lipgloss.Width(mark)) + mark
+			}
+			cells[i] = cell
+		}
+		rows[r] = cells
+	}
 	m.tbl.SetRows(nil) // columns and rows must stay consistent
 	m.tbl.SetColumns(cols)
 	m.tbl.SetRows(rows)
+	// the header is only two lines high once it has columns
+	m.tbl.SetHeight(m.contentHeight() - 1)
 	// keep the selection on the same item across refreshes
 	cur := 0
 	if id, ok := m.selected[m.tab]; ok {
@@ -472,35 +636,72 @@ func warnNum(n uint64) string {
 type colSpec struct {
 	title string
 	width int
-	flex  bool // grows/shrinks with the terminal
+	flex  bool // takes the remaining width
+	prio  int  // columns with the lowest priority are dropped first when the terminal is too narrow
 }
 
-// fitColumns gives fixed columns their width and spreads the rest over the
-// flexible ones.
-func fitColumns(total int, specs []colSpec) []table.Column {
-	fixed, flexW, flexN := 0, 0, 0
-	for _, s := range specs {
-		w := max(s.width, len([]rune(s.title)))
-		if s.flex {
-			flexW += w
-			flexN++
-		} else {
-			fixed += w
-		}
+// minFlex is the narrowest a name column gets before other columns are dropped.
+const minFlex = 20
+
+// fitColumns lays the columns out in total cells: fixed columns keep their
+// width, flexible ones share the rest, and when even that does not fit the
+// lowest priority columns are left out. It returns the columns and the
+// index of the spec each one came from.
+func fitColumns(total int, specs []colSpec) ([]table.Column, []int) {
+	keep := make([]bool, len(specs))
+	for i := range keep {
+		keep[i] = true
 	}
-	avail := total - fixed - 2*len(specs) // cell padding
-	cols := make([]table.Column, len(specs))
+	width := func(s colSpec) int { return max(s.width, lipgloss.Width(s.title)) }
+	need := func() (fixed, flexN, n int) {
+		for i, s := range specs {
+			if !keep[i] {
+				continue
+			}
+			n++
+			if s.flex {
+				flexN++
+			} else {
+				fixed += width(s)
+			}
+		}
+		return
+	}
+	for {
+		fixed, flexN, n := need()
+		if fixed+flexN*minFlex+2*n <= total {
+			break
+		}
+		drop := -1
+		for i, s := range specs {
+			if keep[i] && !s.flex && (drop < 0 || s.prio < specs[drop].prio) {
+				drop = i
+			}
+		}
+		if drop < 0 {
+			break
+		}
+		keep[drop] = false
+	}
+	fixed, flexN, n := need()
+	avail := total - fixed - 2*n // cell padding
+	var cols []table.Column
+	var kept []int
 	for i, s := range specs {
-		w := max(s.width, len([]rune(s.title)))
-		if s.flex && flexW > 0 {
-			w = max(12, avail*w/flexW)
+		if !keep[i] {
+			continue
 		}
-		cols[i] = table.Column{Title: s.title, Width: w}
+		w := width(s)
+		if s.flex {
+			w = max(8, avail/max(flexN, 1))
+		}
+		cols = append(cols, table.Column{Title: s.title, Width: w})
+		kept = append(kept, i)
 	}
-	return cols
+	return cols, kept
 }
 
-func sortPods(v *analysis.View, pods []*analysis.EntityView, by string) {
+func sortPods(pods []*analysis.EntityView, by string, oom map[string]time.Duration) {
 	key := func(e *analysis.EntityView) float64 {
 		s := e.Stats
 		switch by {
@@ -511,6 +712,15 @@ func sortPods(v *analysis.View, pods []*analysis.EntityView, by string) {
 		case "memory":
 			if s.Res != nil {
 				return float64(s.Res.MemCurrent)
+			}
+		case "oom":
+			// soonest first; pods that are not trending to their limit by
+			// how full they are
+			if eta, ok := oom[e.ID]; ok {
+				return 1e12 - eta.Seconds()
+			}
+			if s.Res != nil && s.Res.MemMax > 0 {
+				return float64(s.Res.MemCurrent) / float64(s.Res.MemMax)
 			}
 		case "dns":
 			if s.DNS != nil {
@@ -539,26 +749,140 @@ func sortPods(v *analysis.View, pods []*analysis.EntityView, by string) {
 	})
 }
 
+// ---------------------------------------------------------------- overview
+
+func findingKey(f analysis.Finding) string {
+	k := f.Rule + "|" + f.Title
+	if len(f.Subjects) > 0 {
+		k = f.Rule + "|" + f.Subjects[0]
+	}
+	return k
+}
+
+// findingTarget returns the entity the selected finding is about, if it is
+// in the current data: enter opens it. Findings that do not name their
+// subjects mention the pod in their evidence ("ns/pod: ...").
+func (m *model) findingTarget() string {
+	if m.res == nil || m.findCursor < 0 || m.findCursor >= len(m.findings) {
+		return ""
+	}
+	fd := m.findings[m.findCursor]
+	for _, id := range fd.Subjects {
+		if m.res.View.Entities[id] != nil {
+			return id
+		}
+	}
+	for _, line := range append([]string{fd.Title}, fd.Detail...) {
+		for _, word := range strings.Fields(line) {
+			if id, ok := m.byName[strings.TrimRight(word, ":,")]; ok {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+// showFinding scrolls the Overview so the selected finding is on screen.
+func (m *model) showFinding() {
+	if !m.findingList() || m.findCursor < 0 || m.findCursor >= len(m.findLines) {
+		return
+	}
+	first, n := m.findLines[m.findCursor][0], m.findLines[m.findCursor][1]
+	switch {
+	case m.findCursor == 0:
+		m.vp.GotoTop()
+	case first < m.vp.YOffset:
+		m.vp.SetYOffset(first)
+	case first+n > m.vp.YOffset+m.vp.Height:
+		m.vp.SetYOffset(max(first+min(n, m.vp.Height)-m.vp.Height, 0))
+	}
+}
+
+func (m *model) renderOverview(b *bytes.Buffer) {
+	st, f, v := m.st, m.filt(), m.res.View
+	for _, w := range m.res.Warnings {
+		fmt.Fprintln(b, render.Wrap(st, st.Warn("! "+w), 2))
+	}
+	if len(m.res.SLOs) > 0 {
+		render.Section(b, st, "SLOs")
+		render.SLOs(b, st, m.res.SLOs)
+		fmt.Fprintln(b)
+	}
+	m.findings = m.findings[:0]
+	counts := map[analysis.Severity]int{}
+	for _, fd := range m.res.Findings {
+		if render.MatchFinding(fd, f) {
+			m.findings = append(m.findings, fd)
+			counts[fd.Severity]++
+		}
+	}
+	// stay on the same finding when the data refreshes
+	if m.findKey != "" {
+		for i, fd := range m.findings {
+			if findingKey(fd) == m.findKey {
+				m.findCursor = i
+				break
+			}
+		}
+	}
+	m.findCursor = max(0, min(m.findCursor, len(m.findings)-1))
+	m.findLines = m.findLines[:0]
+	if len(m.findings) == 0 {
+		if len(m.res.Findings) == 0 {
+			fmt.Fprintln(b, st.OK("✔ no problems detected in this window"))
+		} else {
+			fmt.Fprintln(b, st.Dim("no finding matches the filter"))
+		}
+	} else {
+		m.findKey = findingKey(m.findings[m.findCursor])
+		fmt.Fprintln(b, render.Wrap(st, fmt.Sprintf("%d finding(s): %s %d  %s %d  %s %d  %s", len(m.findings),
+			st.Crit("crit"), counts[analysis.SevCrit], st.Warn("warn"), counts[analysis.SevWarn], st.Info("info"), counts[analysis.SevInfo],
+			st.Dim("· ↑/↓ select · enter opens the pod a finding is about")), 2))
+		fmt.Fprintln(b)
+	}
+	inner := st
+	inner.Width = max(st.Width-2, 0)
+	for i, fd := range m.findings {
+		var blk bytes.Buffer
+		details := overviewDetails
+		if i == m.findCursor {
+			details = 0
+		}
+		render.Finding(&blk, inner, fd, details)
+		if i == m.findCursor {
+			if id := m.findingTarget(); id != "" {
+				fmt.Fprintln(&blk, st.Dim("       enter: open "+v.Entities[id].Endpoint.Display()))
+			}
+		}
+		gutter := "  "
+		if i == m.findCursor {
+			gutter = st.Accent("▌") + " "
+		}
+		lines := strings.Split(strings.TrimRight(blk.String(), "\n"), "\n")
+		m.findLines = append(m.findLines, [2]int{bytes.Count(b.Bytes(), []byte("\n")), len(lines)})
+		for _, l := range lines {
+			fmt.Fprintln(b, gutter+l)
+		}
+		fmt.Fprintln(b)
+	}
+	render.Section(b, st, "Slowest paths (RTT p99)")
+	render.Edges(b, st, v, f, "rtt", 8)
+}
+
 // ---------------------------------------------------------------- text tabs
 
 func (m *model) renderText(b *bytes.Buffer) {
 	v := m.res.View
 	f := m.filt()
 	st := m.st
-	switch tabs[m.tab] {
-	case "Overview":
-		for _, w := range m.res.Warnings {
-			fmt.Fprintln(b, st.Warn("! "+w))
-		}
-		if len(m.res.SLOs) > 0 {
-			render.Section(b, st, "SLOs")
-			render.SLOs(b, st, m.res.SLOs)
-			fmt.Fprintln(b)
-		}
-		render.Doctor(b, st, m.res.Findings, f)
-		render.Section(b, st, "Slowest paths (RTT p99)")
-		render.Edges(b, st, v, f, "rtt", 8)
-	case "Network":
+	back := "\nesc: back to the list"
+	if m.back != "" {
+		back = "\nesc: back to " + m.back
+	}
+	switch m.tab {
+	case tabOverview:
+		m.renderOverview(b)
+	case tabNetwork:
 		// look the edge up in the current data so the view refreshes
 		var edge *analysis.Edge
 		for _, e := range v.Edges {
@@ -572,39 +896,48 @@ func (m *model) renderText(b *bytes.Buffer) {
 		} else {
 			fmt.Fprintln(b, st.Dim("this connection has no traffic in the current window"))
 		}
-		fmt.Fprintln(b, st.Dim("\nesc: back to the list"))
-	case "Pods":
+		fmt.Fprintln(b, st.Dim(back))
+	case tabPods:
 		render.Pod(b, st, v, m.detail)
-		fmt.Fprintln(b, st.Dim("\nesc: back to the list"))
-	case "Services":
+		fmt.Fprintln(b, st.Dim(back))
+	case tabServices:
 		render.Services(b, st, v, f)
 		render.Section(b, st, "Replicas worse than their siblings")
 		render.Outliers(b, st, v, f)
 		render.Section(b, st, "Connection pools")
 		render.Pools(b, st, v, m.res.Base, f)
-	case "DNS":
+	case tabDNS:
 		render.DNS(b, st, v, f)
-	case "HTTP":
-		render.HTTP(b, st, v, f)
-		render.Section(b, st, "Database calls (plaintext Postgres / MySQL / Redis)")
-		render.DB(b, st, v, f)
-	case "Nodes":
-		render.Section(b, st, "Control plane")
-		render.ControlPlane(b, st, v)
-		fmt.Fprintln(b)
-		render.Nodes(b, st, v, f)
-		render.Section(b, st, "Memory trending to OOM")
-		render.OOMRisks(b, st, v)
+	case tabApps:
+		fmt.Fprintln(b, st.Title("HTTP routes"))
+		render.HTTP(b, st, v, f, false)
+		render.Section(b, st, "Database statements")
+		render.DB(b, st, v, f, false)
 		render.Section(b, st, "Slow file operations")
 		render.Files(b, st, v, f)
-	case "Events":
-		render.Events(b, st, v, f, nil, 500)
-	case "Security":
+	case tabNodes:
+		render.Nodes(b, st, v, f, nodeDetails)
+		render.Section(b, st, "Control plane")
+		render.ControlPlane(b, st, v, f)
+	case tabEvents:
+		render.Note(b, st, "newest first")
+		render.EventsNewestFirst(b, st, v, f, nil, 500)
+	case tabSecurity:
 		render.Security(b, st, v, f)
-	case "Cost":
+	case tabCost:
+		// costs are monthly extrapolations: use the longer baseline window
+		// when there is one rather than the last minute
+		cv := v
+		if base := m.res.Base; base != nil && base.Seconds() > v.Seconds() {
+			cv = base
+			render.Note(b, st, fmt.Sprintf("computed over the baseline window (%s before the current one), which says more about cost than the last %s",
+				time.Duration(base.Seconds()*float64(time.Second)).Round(time.Minute), m.opts.Window))
+		}
 		render.Section(b, st, "Cost per namespace")
-		render.CostByGroup(b, st, analysis.CostByGroup(v, "", analysis.DefaultPricing, 0.09), "namespace")
-		render.Cost(b, st, v)
+		render.CostByGroup(b, st, analysis.CostByGroup(cv, "", analysis.DefaultPricing, 0.09), "namespace", f)
+		render.Cost(b, st, cv, f)
+	case tabVoIP:
+		render.VoIP(b, st, v, f)
 	}
 }
 
@@ -617,14 +950,25 @@ var (
 	critBadge   = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("9")).Padding(0, 1)
 	warnBadge   = lipgloss.NewStyle().Foreground(lipgloss.Color("0")).Background(lipgloss.Color("11")).Padding(0, 1)
 	hintStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	brandStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 )
 
-func (m *model) View() string {
-	if !m.ready {
-		return "starting…"
+// clip cuts a line that is too wide for the screen.
+func (m *model) clip(s string) string {
+	return lipgloss.NewStyle().MaxWidth(m.width).Render(s)
+}
+
+// titleLine fits what matters most first: errors, then the number of
+// findings, then context for as long as there is room.
+func (m *model) titleLine() string {
+	head := brandStyle.Render("🦫 kubecapybara ")
+	if m.width < 60 {
+		head = brandStyle.Render("🦫 ")
 	}
-	var head strings.Builder
-	head.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13")).Render("🦫 kubecapybara "))
+	room := func(s string) bool { return lipgloss.Width(head)+lipgloss.Width(s) <= m.width }
+	if m.err != nil {
+		head += critBadge.Render("error: "+truncate(m.err.Error(), max(12, min(60, m.width-40)))) + " "
+	}
 	if m.res != nil {
 		var crit, warn int
 		for _, f := range m.res.Findings {
@@ -636,40 +980,92 @@ func (m *model) View() string {
 			}
 		}
 		if crit > 0 {
-			head.WriteString(critBadge.Render(fmt.Sprintf("%d crit", crit)) + " ")
+			head += critBadge.Render(fmt.Sprintf("%d crit", crit)) + " "
 		}
 		if warn > 0 {
-			head.WriteString(warnBadge.Render(fmt.Sprintf("%d warn", warn)) + " ")
+			head += warnBadge.Render(fmt.Sprintf("%d warn", warn)) + " "
 		}
-		v := m.res.View
-		head.WriteString(statusStyle.Render(fmt.Sprintf(" window %s · %d nodes · %d flows · updated %s · %s",
-			m.opts.Window, len(v.Nodes), len(v.Edges), m.updated.Format("15:04:05"), m.opts.Source)))
 	}
 	if m.loading {
-		head.WriteString(statusStyle.Render(" ⟳"))
+		head += statusStyle.Render("⟳ ")
 	}
-	if m.err != nil {
-		head.WriteString(" " + critBadge.Render("error: "+truncate(m.err.Error(), 60)))
-	}
-
-	var tb []string
-	for i, t := range tabs {
-		label := fmt.Sprintf("%d %s", (i+1)%10, t)
-		if i == m.tab {
-			tb = append(tb, tabActive.Render(label))
-		} else {
-			tb = append(tb, tabInactive.Render(label))
+	if m.res != nil {
+		v := m.res.View
+		sep := ""
+		for _, part := range []string{
+			fmt.Sprintf("window %s", m.opts.Window), fmt.Sprintf("%d nodes", len(v.Nodes)), fmt.Sprintf("%d flows", len(v.Edges)),
+			"updated " + m.updated.Format("15:04:05"), m.opts.Source,
+		} {
+			if part == "" || !room(sep+part) {
+				break
+			}
+			head += statusStyle.Render(sep + part)
+			sep = " · "
 		}
 	}
+	return m.clip(head)
+}
 
+// tabBar shows full names when they fit, short names on narrower
+// terminals and, below that, only the keys next to the current tab.
+func (m *model) tabBar() string {
+	vis := m.visible()
+	label := func(i int, name string) string {
+		k := "v"
+		if i < 10 {
+			k = strconv.Itoa((i + 1) % 10)
+		}
+		if name == "" {
+			return k
+		}
+		return k + " " + name
+	}
+	build := func(mode int) string {
+		var tb []string
+		for i, t := range vis {
+			name := t
+			// the current tab always keeps its full name
+			switch {
+			case t == m.tab:
+			case mode == 1:
+				name = shortTabs[t]
+			case mode == 2:
+				name = ""
+			}
+			if t == m.tab {
+				tb = append(tb, tabActive.Render(label(i, name)))
+			} else {
+				tb = append(tb, tabInactive.Render(label(i, name)))
+			}
+		}
+		return strings.Join(tb, "")
+	}
+	for mode := 0; mode < 3; mode++ {
+		if bar := build(mode); lipgloss.Width(bar) <= m.width || mode == 2 {
+			return m.clip(bar)
+		}
+	}
+	return ""
+}
+
+func (m *model) View() string {
+	if !m.ready {
+		return "starting…"
+	}
+	m.syncKeys()
 	var body string
 	if m.res != nil && m.tableTab() {
 		sorts := edgeSorts
-		if tabs[m.tab] == "Pods" {
+		legend := "⇄ = cross-zone · ! = errors"
+		if m.tab == tabPods {
 			sorts = podSorts
+			legend = "a: host processes off"
+			if m.showHosts {
+				legend = "a: host processes on"
+			}
 		}
-		hint := hintStyle.Render(fmt.Sprintf("sort: %s (s/S) · %d rows · enter: details · ⇄ = cross-zone · ! = errors", sorts[m.sortIdx[m.tab]], len(m.rowIDs)))
-		body = hint + "\n" + m.tbl.View()
+		hint := hintStyle.Render(fmt.Sprintf("sort: %s (s/S) · %d rows · enter: details · %s", sorts[m.sortIdx[m.tab]], len(m.rowIDs), legend))
+		body = m.clip(hint) + "\n" + m.tbl.View()
 	} else {
 		body = m.vp.View()
 	}
@@ -678,14 +1074,14 @@ func (m *model) View() string {
 	if m.filtering || m.filter.Value() != "" {
 		footer = m.filter.View()
 	}
-	return head.String() + "\n" + strings.Join(tb, "") + "\n" + body + "\n" + footer
+	return m.titleLine() + "\n" + m.tabBar() + "\n" + body + "\n" + footer
 }
 
 func truncate(s string, n int) string {
-	if len(s) <= n {
+	if len([]rune(s)) <= n {
 		return s
 	}
-	return s[:n] + "…"
+	return string([]rune(s)[:n]) + "…"
 }
 
 // Frame renders a single dashboard frame without a terminal (used for
@@ -693,23 +1089,15 @@ func truncate(s string, n int) string {
 // or an edge key (Network tab).
 func Frame(res *Result, opts Options, width, height, tab int, detail string) string {
 	m := newModel(nil, opts)
-	m.res, m.updated, m.loading = res, time.Now(), false
+	m.setResult(res)
+	m.loading = false
 	m.Update(tea.WindowSizeMsg{Width: width, Height: height})
-	m.tab = tab
-	m.detail = detail
-	if detail != "" && tabs[tab] == "Network" {
-		m.buildTableFor("Network")
+	if tab >= 0 && tab < len(tabs) {
+		m.tab = tabs[tab]
 	}
+	m.detail = detail
 	m.refresh(true)
 	return m.View()
-}
-
-// buildTableFor populates edge lookups for a tab without showing it.
-func (m *model) buildTableFor(tab string) {
-	saved, savedDetail := m.tab, m.detail
-	m.tab, m.detail = TabIndex(tab), ""
-	m.buildTable()
-	m.tab, m.detail = saved, savedDetail
 }
 
 // EdgeKey exposes the detail key of an edge (for screenshots).

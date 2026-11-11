@@ -122,17 +122,20 @@ func (o *options) cmdDNS() *cobra.Command {
 }
 
 func (o *options) cmdHTTP() *cobra.Command {
-	return &cobra.Command{
+	var perPod bool
+	c := &cobra.Command{
 		Use:   "http",
-		Short: "HTTP/1.x rate, errors and latency per route (agent --l7)",
+		Short: "HTTP/1.x rate, errors and latency per route and workload (agent --l7)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return r.View.Entities }, func(st render.Style, r *tui.Result) error {
 				render.Header(os.Stdout, st, r.View, o.src.Describe())
-				render.HTTP(os.Stdout, st, r.View, o.filt())
+				render.HTTP(os.Stdout, st, r.View, o.filt(), perPod)
 				return nil
 			})
 		},
 	}
+	c.Flags().BoolVar(&perPod, "per-pod", false, "one row per pod instead of merging the replicas of a workload")
+	return c
 }
 
 func (o *options) cmdNodes() *cobra.Command {
@@ -143,7 +146,7 @@ func (o *options) cmdNodes() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.NodeReports(r.View) }, func(st render.Style, r *tui.Result) error {
 				render.Header(os.Stdout, st, r.View, o.src.Describe())
-				render.Nodes(os.Stdout, st, r.View, o.filt())
+				render.Nodes(os.Stdout, st, r.View, o.filt(), 0)
 				return nil
 			})
 		},
@@ -374,8 +377,8 @@ func (o *options) cmdCost() *cobra.Command {
 				return map[string]any{"groups": analysis.CostByGroup(r.View, label, price, egress), "crossZone": analysis.CrossZoneCosts(r.View)}
 			}, func(st render.Style, r *tui.Result) error {
 				render.Section(os.Stdout, st, "Cost per "+by)
-				render.CostByGroup(os.Stdout, st, analysis.CostByGroup(r.View, label, price, egress), by)
-				render.Cost(os.Stdout, st, r.View)
+				render.CostByGroup(os.Stdout, st, analysis.CostByGroup(r.View, label, price, egress), by, o.filt())
+				render.Cost(os.Stdout, st, r.View, o.filt())
 				return nil
 			})
 		},
@@ -615,18 +618,21 @@ func (o *options) cmdOOM() *cobra.Command {
 }
 
 func (o *options) cmdDB() *cobra.Command {
-	return &cobra.Command{
+	var perPod bool
+	c := &cobra.Command{
 		Use:     "db",
 		Aliases: []string{"queries", "sql"},
-		Short:   "Slowest and failing Postgres/MySQL/Redis statements per pod (agent --l7, plaintext only)",
+		Short:   "Slowest and failing database statements per workload: Postgres, MySQL, Redis, Cassandra, Kafka, MongoDB, Memcached (agent --l7, plaintext only)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return r.View.Entities }, func(st render.Style, r *tui.Result) error {
 				render.Header(os.Stdout, st, r.View, o.src.Describe())
-				render.DB(os.Stdout, st, r.View, o.filt())
+				render.DB(os.Stdout, st, r.View, o.filt(), perPod)
 				return nil
 			})
 		},
 	}
+	c.Flags().BoolVar(&perPod, "per-pod", false, "one row per pod instead of merging the replicas of a workload")
+	return c
 }
 
 func (o *options) cmdVoIP() *cobra.Command {
@@ -910,7 +916,7 @@ func (o *options) cmdControlPlane() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return o.simple(cmd.Context(), false, func(r *tui.Result) any { return analysis.ControlPlane(r.View) }, func(st render.Style, r *tui.Result) error {
 				render.Header(os.Stdout, st, r.View, o.src.Describe())
-				render.ControlPlane(os.Stdout, st, r.View)
+				render.ControlPlane(os.Stdout, st, r.View, o.filt())
 				return nil
 			})
 		},

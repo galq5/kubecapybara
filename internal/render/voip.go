@@ -16,7 +16,7 @@ func VoIP(w io.Writer, st Style, v *analysis.View, f Filter) {
 		}
 	}
 	if len(rows) == 0 {
-		fmt.Fprintln(w, st.Dim("no SIP or RTP traffic observed (agent --voip; SIP on --sip-ports, RTP on --rtp-ports; TLS/SRTP signalling is not visible)"))
+		Note(w, st, "no SIP or RTP traffic observed (agent --voip; SIP on --sip-ports, RTP on --rtp-ports; TLS/SRTP signalling is not visible)")
 		return
 	}
 
@@ -55,7 +55,7 @@ func VoIP(w io.Writer, st Style, v *analysis.View, f Filter) {
 		t.AddRow(r.Endpoint.Display(), fmt.Sprint(r.Attempts), fmt.Sprint(r.Answered), asr, failed, fmt.Sprint(r.Active), avg, pdd, trying, retr, r.TopCodes(4))
 	}
 	t.Render(w, st)
-	fmt.Fprintln(w, st.Dim("ASR = answered / attempts; PDD = post-dial delay (INVITE → 180/183); TRYING = INVITE → first response; busy/no-answer (486/480/487/603) are not failures"))
+	Note(w, st, "ASR = answered / attempts; PDD = post-dial delay (INVITE → 180/183); TRYING = INVITE → first response; busy/no-answer (486/480/487/603) are not failures")
 
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, st.Title("Media (RTP)"))
@@ -100,5 +100,5 @@ func VoIP(w io.Writer, st Style, v *analysis.View, f Filter) {
 			jp50, analysis.Dur(float64(m.JitterMaxUs)), one, wait, worst)
 	}
 	t.Render(w, st)
-	fmt.Fprintln(w, st.Dim("loss and jitter are measured on inbound media (RFC 3550); audio degrades above ~1% loss or ~30ms jitter; CPU WAIT = time the pod waited for a CPU per second on CPU"))
+	Note(w, st, "loss and jitter are measured on inbound media (RFC 3550); audio degrades above ~1% loss or ~30ms jitter; CPU WAIT = time the pod waited for a CPU per second on CPU")
 }

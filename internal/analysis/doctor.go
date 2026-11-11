@@ -125,6 +125,23 @@ func DoctorWith(v *View, base *View, slos []SLO) []Finding {
 	return out
 }
 
+// sortedEntities returns the entities by display name, for rules whose
+// output must not depend on map order (the first subject of a finding
+// names the object the controller keeps for it).
+func sortedEntities(v *View) []*EntityView {
+	out := make([]*EntityView, 0, len(v.Entities))
+	for _, e := range v.Entities {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if a, b := out[i].Endpoint.Display(), out[j].Endpoint.Display(); a != b {
+			return a < b
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
+}
+
 func top[T any](items []T, n int) []T {
 	if len(items) > n {
 		return items[:n]
@@ -272,7 +289,7 @@ func ruleDNSErrors(v *View) []Finding {
 	var lines []string
 	var subj []string
 	sev := SevWarn
-	for _, e := range v.Entities {
+	for _, e := range sortedEntities(v) {
 		d := e.Stats.DNS
 		if d == nil || d.Queries < 5 {
 			continue
@@ -299,7 +316,6 @@ func ruleDNSErrors(v *View) []Finding {
 	if len(lines) == 0 {
 		return nil
 	}
-	sort.Strings(lines)
 	return []Finding{{Severity: sev, Category: "dns", Title: fmt.Sprintf("DNS failures in %d workload(s)", len(lines)),
 		Detail: top(lines, 10), Hint: "check CoreDNS health/logs, upstream resolvers and NetworkPolicies allowing UDP/TCP 53",
 		Subjects: subj, Score: float64(len(lines))}}
@@ -492,7 +508,8 @@ func ruleDrops(v *View) []Finding {
 		lines = append(lines, line)
 	}
 	return []Finding{{Severity: sev, Category: "network", Title: fmt.Sprintf("kernel dropped %d packets (%s/s)", total, Rate(v.PerSec(total))),
-		Detail: top(lines, 10), Score: float64(total)}}
+		Detail: top(lines, 10), Score: float64(total),
+		Hint: "each reason says where in the kernel the packet died; `kubectl capybara nodes` lists them per flow, `kubectl capybara security` the ones blocked by policies"}}
 }
 
 func ruleConntrack(v *View) []Finding {
@@ -513,7 +530,8 @@ func ruleConntrack(v *View) []Finding {
 		}
 		if s.ConntrackDrop+s.ConntrackEarlyDrop > 0 {
 			out = append(out, Finding{Severity: SevCrit, Category: "network",
-				Title: fmt.Sprintf("node %s dropped %d packets because conntrack was full", n.Name, s.ConntrackDrop+s.ConntrackEarlyDrop), Score: 1})
+				Title: fmt.Sprintf("node %s dropped %d packets because conntrack was full", n.Name, s.ConntrackDrop+s.ConntrackEarlyDrop), Score: 1,
+				Hint: "raise net.netfilter.nf_conntrack_max on the node and look for clients opening a connection per request (connection churn)"})
 		}
 		if s.ConntrackInsertFailed > 0 {
 			out = append(out, Finding{Severity: SevWarn, Category: "network",
@@ -543,7 +561,8 @@ func ruleConnErrors(v *View) []Finding {
 	}
 	if len(unreach) > 0 {
 		out = append(out, Finding{Severity: SevWarn, Category: "network", Title: "connect() failing with unreachable network/host",
-			Detail: top(unreach, 10), Score: float64(len(unreach))})
+			Detail: top(unreach, 10), Score: float64(len(unreach)),
+			Hint: "the pod has no route to the destination: check the CNI on its node, the pod's routes and whether the target network exists"})
 	}
 	return out
 }
@@ -737,11 +756,13 @@ func ruleHTTP(v *View) []Finding {
 	}
 	if len(errLines) > 0 {
 		sort.Strings(errLines)
-		out = append(out, Finding{Severity: sev, Category: "http", Title: "HTTP 5xx errors", Detail: top(errLines, 10), Score: float64(len(errLines))})
+		out = append(out, Finding{Severity: sev, Category: "http", Title: "HTTP 5xx errors", Detail: top(errLines, 10), Score: float64(len(errLines)),
+			Hint: "`kubectl capybara pod <pod>` shows what the failing server waits on (CPU, database, downstream calls); compare replicas with `outliers` and a recent deploy with `rollout <deployment>`"})
 	}
 	if len(slowLines) > 0 {
 		sort.Strings(slowLines)
-		out = append(out, Finding{Severity: SevInfo, Category: "http", Title: "slow HTTP endpoints (p99 > 1s)", Detail: top(slowLines, 10), Score: float64(len(slowLines))})
+		out = append(out, Finding{Severity: SevInfo, Category: "http", Title: "slow HTTP endpoints (p99 > 1s)", Detail: top(slowLines, 10), Score: float64(len(slowLines)),
+			Hint: "see where the time goes with `kubectl capybara pod <pod>` (waiting for CPU, database statements, dependencies) or `kubectl capybara profile <pod>`"})
 	}
 	return out
 }
