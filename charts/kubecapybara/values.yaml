@@ -183,6 +183,16 @@ controller:
     webhookURL: ""
     # -- Slack (or Mattermost) incoming webhook URL.
     slackWebhookURL: ""
+  # -- Tune the doctor (same format as `kubectl capybara --doctor-config`;
+  # `kubectl capybara doctor --list-rules` lists rules and thresholds):
+  #   doctor:
+  #     mute: [internet-egress, undeclared-ports]
+  #     thresholds: {http-5xx-ratio: 0.05, cpu-throttled-ratio: 0.5}
+  doctor:
+    # -- Rules that create no findings and no notifications.
+    mute: []
+    # -- Limits to override.
+    thresholds: {}
   # -- SLOs evaluated with burn-rate alerts, same format as --slo-file:
   #   - {name: checkout-latency, workload: shop/Deployment/checkout, latency: 300ms, latencyObjective: 99}
   #   - {name: api-availability, service: shop/api, availability: 99.5}

@@ -27,12 +27,30 @@ func (o *options) cmdTop() *cobra.Command {
 }
 
 func (o *options) cmdDoctor() *cobra.Command {
-	return &cobra.Command{
+	var list bool
+	c := &cobra.Command{
 		Use:     "doctor",
 		Aliases: []string{"diag"},
-		Short:   "Diagnose what is wrong right now (ranked findings with hints)",
-		RunE:    func(cmd *cobra.Command, _ []string) error { return o.runDoctorText(cmd.Context()) },
+		Short:   "Diagnose what is wrong right now: findings grouped per workload, likely causes first, with hints",
+		Long: `Runs every doctor rule over the window and groups what it finds by the
+workload (or node) it is about: the findings of one workload are usually one
+problem seen from several angles. Within a problem the likely causes come
+first (crashes and memory, then CPU and disk, then dependencies, then the
+symptoms). Findings not seen in the baseline window are marked "new".
+
+Recommendations (cost, hygiene) are listed apart from the problems.
+--flat prints the plain ranked list; -o json always does.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if list {
+				listRules(os.Stdout)
+				return nil
+			}
+			return o.runDoctorText(cmd.Context())
+		},
 	}
+	c.Flags().BoolVar(&o.flat, "flat", false, "one ranked list of findings instead of problems per workload")
+	c.Flags().BoolVar(&list, "list-rules", false, "list the doctor rules and thresholds (for --mute and --doctor-config) and exit")
+	return c
 }
 
 // simple runs a renderer over a freshly loaded view.

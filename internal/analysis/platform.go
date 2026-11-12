@@ -134,7 +134,7 @@ func ruleControlPlane(v *View) []Finding {
 		return nil
 	}
 	return []Finding{{Severity: sev, Category: "control-plane", Title: "control plane components degraded", Detail: top(lines, 10),
-		Hint:  "a slow etcd or starved API server slows down every kubectl, controller and deploy; give them dedicated CPU and fast disks",
+		Hint:  "a slow etcd or starved API server slows down every kubectl, controller and deploy: give them dedicated CPU and fast disks; for cluster DNS see `kubectl capybara dns`",
 		Score: float64(len(lines))}}
 }
 

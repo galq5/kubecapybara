@@ -40,6 +40,7 @@ func main() {
 		clusterDomain = flag.String("cluster-domain", "cluster.local", "cluster DNS domain")
 		cluster       = flag.String("cluster-name", os.Getenv("CAPYBARA_CLUSTER_NAME"), "cluster name shown in notifications")
 		sloFile       = flag.String("slo-file", os.Getenv("CAPYBARA_SLO_FILE"), "YAML file with SLO definitions")
+		doctorFile    = flag.String("doctor-config", os.Getenv("CAPYBARA_DOCTOR_CONFIG"), "YAML file muting doctor rules and overriding their thresholds")
 		minSev        = flag.String("min-severity", "warn", "lowest severity stored and notified: info, warn or crit")
 		resolveAfter  = flag.Duration("resolve-after", 10*time.Minute, "resolve a finding after it has not been seen for this long")
 		keepResolved  = flag.Duration("keep-resolved", time.Hour, "delete resolved findings after this long")
@@ -59,7 +60,7 @@ func main() {
 		Namespace: *namespace, Cluster: *cluster, Interval: *interval, Window: *window, Baseline: *baseline,
 		ResolveAfter: *resolveAfter, KeepResolved: *keepResolved,
 		Options: analysis.Options{ClusterDomain: *clusterDomain, CostPerGB: *costPerGB},
-	}, *minSev, *sloFile, *agentNS, *agentSelector, *agentPort, *tokenSecret, *hubURL, *top, *once); err != nil {
+	}, *minSev, *sloFile, *doctorFile, *agentNS, *agentSelector, *agentPort, *tokenSecret, *hubURL, *top, *once); err != nil {
 		log.Error("controller stopped", "err", err)
 		os.Exit(1)
 	}
@@ -95,7 +96,7 @@ func restConfig(kubeconfig string) (*rest.Config, error) {
 	return clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
 }
 
-func run(log *slog.Logger, kubeconfig string, cfg controller.Config, minSev, sloFile, agentNS, selector string, port int, tokenSecret, hubURL string, top int, once bool) error {
+func run(log *slog.Logger, kubeconfig string, cfg controller.Config, minSev, sloFile, doctorFile, agentNS, selector string, port int, tokenSecret, hubURL string, top int, once bool) error {
 	sev, err := parseSeverity(minSev)
 	if err != nil {
 		return err
@@ -106,6 +107,11 @@ func run(log *slog.Logger, kubeconfig string, cfg controller.Config, minSev, slo
 	}
 	if sloFile != "" {
 		if cfg.SLOs, err = analysis.LoadSLOs(sloFile); err != nil {
+			return err
+		}
+	}
+	if doctorFile != "" {
+		if cfg.Options.Doctor, err = analysis.LoadDoctorConfig(doctorFile); err != nil {
 			return err
 		}
 	}
@@ -140,7 +146,7 @@ func run(log *slog.Logger, kubeconfig string, cfg controller.Config, minSev, slo
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	log.Info("capybara-controller started", "version", version, "interval", cfg.Interval, "window", cfg.Window,
-		"source", src.Describe(), "notifiers", len(notifiers), "slos", len(cfg.SLOs), "min-severity", cfg.MinSeverity.String())
+		"source", src.Describe(), "notifiers", len(notifiers), "slos", len(cfg.SLOs), "min-severity", cfg.MinSeverity.String(), "muted-rules", len(cfg.Options.Doctor.Mute))
 	if once {
 		return c.RunOnce(ctx)
 	}

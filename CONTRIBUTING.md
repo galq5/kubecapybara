@@ -69,8 +69,13 @@ the `bpf` CI job.
   panic there stops the agent.
 * Timestamps from `bpf_ktime_get_ns` are unsigned and events from different
   CPUs can arrive out of order: guard every subtraction.
-* Doctor rules live in `internal/analysis`. Give a rule a stable id in the
-  `rules` table, a hint that says what to do, and a test with a fixture.
+* Doctor rules live in `internal/analysis`. Give a rule a stable id and a
+  description in the `rules` table, a hint that says what to do, and a test
+  with a fixture. Start evidence lines with the pod or workload they are
+  about (`ns/pod: ...`): that is how findings are grouped into problems.
+  Limits a user may want to change go into the `Thresholds` table and are
+  read with `v.th("name")`; write `<pod>`, `<deployment>` or `<workload>` in
+  a hint where a command needs a name.
 * Label values exported on `/metrics` go through `labels()`, which escapes
   them for the Prometheus text format.
 

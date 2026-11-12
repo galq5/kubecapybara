@@ -14,8 +14,9 @@ kubectl capybara startup payments-7f9c # why does it take 40s to become Ready?
 
 ![doctor overview](docs/screens/overview.png)
 
-<details><summary>More screens: pods, pod detail, network, connection detail, services, DNS, apps (HTTP, databases, files), nodes, cost, VoIP</summary>
+<details><summary>More screens: one problem in full, pods, pod detail, network, connection detail, services, DNS, apps (HTTP, databases, files), nodes, cost, VoIP</summary>
 
+![problem](docs/screens/problem.png)
 ![pods](docs/screens/pods.png)
 ![pod detail](docs/screens/pod-detail.png)
 ![network](docs/screens/network.png)
@@ -69,6 +70,49 @@ black holes, CPU throttling, memory near the limit and reclaim stalls, slow
 disks, HTTP 5xx, crash loops. It also compares the current window to a
 **baseline** (default: the previous hour) and reports regressions and new
 dependencies.
+
+One broken pod trips many rules at once, so the doctor does not hand you a
+flat list: findings are grouped into **problems**, one per workload or node.
+
+```
+CRIT shop/Deployment/payments · 15 findings: crash, memory, cpu, network, db, http, regression
+     first sign 08:16:28 OOM killer selected pid 4242 (anon-rss 3.9GiB, ...)
+     see also data/StatefulSet/postgres (CRIT, 6 findings), shop/Deployment/frontend (WARN, 7 findings)
+  CRIT [crash] shop/payments-7f9c5d6b4-fghij crashed 25s ago: ... killed by SIGKILL; OOM killed (crash)
+       → kubectl capybara why-crash shop/payments-7f9c5d6b4-fghij
+  WARN [cpu] pods waiting for CPU (noisy neighbours / CPU saturation) new (cpu-runqueue)
+       • shop/payments-7f9c5d6b4-fghij: run queue p99 130.3ms ...; CPU taken by data/postgres-0 (12.00s)
+  ...
+```
+
+* Within a problem the likely causes come first (crashes and memory, then CPU
+  and disk, then dependencies) and the symptoms last (HTTP errors, outliers,
+  regressions). "see also" lists the other problems its evidence points at:
+  a dependency, a caller, a noisy neighbour.
+* `new` marks a finding the baseline hour did not have for that workload,
+  `ongoing` one it did.
+* Commands in hints carry the real pod and workload names.
+* A failing call seen on both ends is reported once, on the server, with the
+  callers it fails for.
+* Recommendations (cost, rightsizing, hygiene) are listed apart: nothing is
+  broken there.
+
+`kubectl capybara doctor --flat` prints the plain ranked list, `-o json` the
+findings. To make the doctor quieter or stricter:
+
+```bash
+kubectl capybara doctor --list-rules                 # rule ids and thresholds
+kubectl capybara doctor --mute internet-egress,undeclared-ports
+kubectl capybara --doctor-config doctor.yaml         # or $CAPYBARA_DOCTOR_CONFIG
+```
+
+```yaml
+# doctor.yaml
+mute: [internet-egress]
+thresholds:
+  http-5xx-ratio: 0.05        # report routes above 5% 5xx instead of 1%
+  cpu-throttled-ratio: 0.5
+```
 
 ## Architecture
 
@@ -248,7 +292,16 @@ helm upgrade capybara ... --set controller.enabled=true \
 The generic webhook receives `{"event":"firing","namespace":...,"name":...,
 "rule":...,"severity":"CRIT","title":...,"details":[...],"hint":...}`; the
 Slack format also works with Mattermost. SLOs set in `controller.slos` (same
-format as `--slo-file`) get burn-rate findings.
+format as `--slo-file`) get burn-rate findings. `controller.doctor` mutes
+rules and overrides thresholds (same format as `--doctor-config`), so a rule
+you do not care about creates no objects and no notifications:
+
+```yaml
+controller:
+  doctor:
+    mute: [internet-egress, undeclared-ports]
+    thresholds: {http-5xx-ratio: 0.05}
+```
 
 ### Releasing
 
@@ -288,7 +341,7 @@ on narrow ones the tables keep their error columns and drop volumes first.
 
 | Tab | Key | What it answers |
 |---|---|---|
-| Overview | `1` | What is wrong right now: the doctor's findings, worst first, each with its evidence and what to do. `↑`/`↓` select a finding, `enter` opens the pod it is about |
+| Overview | `1` | What is wrong right now: the doctor's problems, worst first. `↑`/`↓` select one, `enter` opens it with all its evidence and what to do, `enter` again opens the pod it is about, `esc` goes back |
 | Network | `2` | Every connection between pods, Services and the outside: latency, errors, volume. `enter` opens one connection |
 | Pods | `3` | CPU, waiting for CPU, memory, time to OOM, throttling, errors per pod (`a` adds host processes). `enter` opens a pod: last crash, where its time goes, dependencies, HTTP, database, startup |
 | Services | `4` | Load balance over backends, replicas worse than their siblings, connection pools |
@@ -301,7 +354,8 @@ on narrow ones the tables keep their error columns and drop volumes first.
 | VoIP | `v` | SIP calls and RTP quality; only shown when there is voice traffic |
 
 `/` filters every tab, `s`/`S` change the sort order of the Network and Pods
-tables, `<`/`>` scroll sideways, `?` lists all keys.
+tables, `[`/`]` jump between the sections of a long tab, `<`/`>` scroll
+sideways, `?` lists all keys and explains the columns of the table on screen.
 
 Talk to agents directly (e.g. on a single node, without the API server):
 

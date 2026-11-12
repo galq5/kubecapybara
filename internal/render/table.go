@@ -298,6 +298,13 @@ func Bar(share float64, width int) string {
 
 // Section prints a section header.
 func Section(w io.Writer, st Style, title string) {
-	fmt.Fprintln(w)
+	// a screen that lets the user jump between sections wants to know them
+	if m, ok := w.(interface{ MarkSection(string) }); ok {
+		m.MarkSection(title)
+	}
+	// no blank line before the first thing in a buffer
+	if b, ok := w.(interface{ Len() int }); !ok || b.Len() > 0 {
+		fmt.Fprintln(w)
+	}
 	fmt.Fprintln(w, st.Title(title))
 }

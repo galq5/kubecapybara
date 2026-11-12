@@ -38,8 +38,13 @@ type Finding struct {
 	Subjects []string `json:"subjects,omitempty"` // entity IDs involved
 	Score    float64  `json:"score"`
 	// Rule identifies the rule that produced the finding (stable across
-	// runs, e.g. "dns-ndots"); used to track findings over time.
+	// runs, e.g. "dns-ndots"); used to track findings over time and to
+	// mute it.
 	Rule string `json:"rule"`
+
+	// hint as the rule wrote it, with <pod>, <deployment> and <workload>
+	// placeholders (Hint has them filled in for the first subject)
+	rawHint string
 }
 
 // benign drop reasons that happen during normal operation
@@ -73,47 +78,85 @@ var badDrops = map[string]string{
 
 // rule is a named doctor rule.
 type rule struct {
-	id string
-	fn func(*View) []Finding
+	id   string
+	desc string
+	fn   func(*View) []Finding
 }
 
 var rules = []rule{
-	{"crash", ruleCrashes}, {"restarts", ruleRestarts}, {"memory", ruleOOMAndMemory}, {"dns-ndots", ruleNdots},
-	{"dns-errors", ruleDNSErrors}, {"dns-slow", ruleDNSSlow}, {"refused", ruleRefused}, {"connect-timeouts", ruleTimeouts},
-	{"retransmits", ruleRetrans}, {"mtu", ruleMTU}, {"drops", ruleDrops}, {"conntrack", ruleConntrack},
-	{"connect-errors", ruleConnErrors}, {"churn", ruleChurn}, {"cross-zone", ruleCrossZone}, {"apiserver-load", ruleAPIServer},
-	{"cpu-runqueue", ruleRunQ}, {"cpu-throttling", ruleThrottle}, {"disk-latency", ruleDisk}, {"http", ruleHTTP},
-	{"exec-shell", ruleSecurity}, {"undeclared-ports", ruleUndeclaredPorts}, {"internet-egress", ruleExternalEgress},
-	{"collectors", ruleCollectors}, {"oom-risk", ruleOOMRisk}, {"policy-denials", rulePolicyDenials},
-	{"accept-queue", ruleAcceptQueue}, {"zero-window", ruleZeroWindow}, {"slow-node", ruleSlowNodes},
-	{"service-balance", ruleServiceBalance}, {"rightsizing", ruleRightsizing}, {"db", ruleDB}, {"files", ruleFiles},
-	{"outlier-replica", ruleOutliers}, {"control-plane", ruleControlPlane}, {"node-network", ruleNodeNetwork},
-	{"voip", ruleVoIP},
+	{"crash", "containers whose main process died (flight recorder)", ruleCrashes},
+	{"restarts", "containers restarting repeatedly (Kubernetes status)", ruleRestarts},
+	{"memory", "pods close to their memory limit or stalled in direct reclaim", ruleOOMAndMemory},
+	{"dns-ndots", "DNS lookups wasted by search-path expansion (ndots:5)", ruleNdots},
+	{"dns-errors", "DNS lookups failing (SERVFAIL, REFUSED, timeouts)", ruleDNSErrors},
+	{"dns-slow", "slow DNS resolution and slow DNS server replicas", ruleDNSSlow},
+	{"refused", "connection attempts refused", ruleRefused},
+	{"connect-timeouts", "connection attempts timing out", ruleTimeouts},
+	{"retransmits", "lossy paths and nodes with elevated TCP retransmits", ruleRetrans},
+	{"mtu", "signs of MTU problems", ruleMTU},
+	{"drops", "packets dropped by the kernel, by reason", ruleDrops},
+	{"conntrack", "conntrack table pressure and insert failures", ruleConntrack},
+	{"connect-errors", "connect() failing: port exhaustion, unreachable networks", ruleConnErrors},
+	{"churn", "clients opening a new TCP connection per request", ruleChurn},
+	{"cross-zone", "cost of traffic between zones", ruleCrossZone},
+	{"apiserver-load", "workloads hammering the Kubernetes API server", ruleAPIServer},
+	{"cpu-runqueue", "pods waiting for a CPU (noisy neighbours)", ruleRunQ},
+	{"cpu-throttling", "pods throttled by their CPU limit", ruleThrottle},
+	{"disk-latency", "slow block I/O", ruleDisk},
+	{"http", "HTTP 5xx errors and slow endpoints", ruleHTTP},
+	{"exec-shell", "interactive exec sessions and shells spawned by applications", ruleSecurity},
+	{"undeclared-ports", "listening ports that are not declared", ruleUndeclaredPorts},
+	{"internet-egress", "workloads talking to the internet", ruleExternalEgress},
+	{"collectors", "agent collectors that are not running", ruleCollectors},
+	{"oom-risk", "pods whose memory grows towards the limit", ruleOOMRisk},
+	{"policy-denials", "traffic blocked by NetworkPolicies or firewalls", rulePolicyDenials},
+	{"accept-queue", "servers too slow to accept or read connections", ruleAcceptQueue},
+	{"zero-window", "transfers stalled by a slow receiver", ruleZeroWindow},
+	{"slow-node", "nodes with high latency to the other nodes", ruleSlowNodes},
+	{"service-balance", "Services that spread load unevenly", ruleServiceBalance},
+	{"rightsizing", "requests far from measured usage", ruleRightsizing},
+	{"db", "failing and slow database statements", ruleDB},
+	{"files", "pods blocked on slow file operations", ruleFiles},
+	{"outlier-replica", "replicas much worse than their siblings", ruleOutliers},
+	{"control-plane", "degraded control plane components", ruleControlPlane},
+	{"node-network", "node NICs and network stack losing packets", ruleNodeNetwork},
+	{"voip", "SIP call failures and RTP quality (also sip-failures, sip-slow-setup, sip-retransmissions, rtp-loss, rtp-jitter, rtp-one-way)", ruleVoIP},
+	{"pools", "oversized connection pools and connect storms (also pool-idle, connect-storm)", nil},
+	{"regression", "metrics that got worse than in the baseline window, new dependencies", nil},
+	{"slo-burn", "SLO error budgets burning too fast", nil},
 }
 
 // Doctor runs all rules. base may be nil; when present regressions are
 // detected by comparing the current window with the baseline window.
 func Doctor(v *View, base *View) []Finding { return DoctorWith(v, base, nil) }
 
-// DoctorWith runs all rules plus SLO burn rate checks.
+// DoctorWith runs all rules plus SLO burn rate checks. Rules muted in
+// v.Opts.Doctor are skipped.
 func DoctorWith(v *View, base *View, slos []SLO) []Finding {
 	var out []Finding
+	muted := v.Opts.Doctor.muted()
 	add := func(id string, fs []Finding) {
 		for i := range fs {
 			if fs[i].Rule == "" {
 				fs[i].Rule = id
 			}
+			if !muted[id] && !muted[fs[i].Rule] {
+				out = append(out, fs[i])
+			}
 		}
-		out = append(out, fs...)
 	}
 	for _, r := range rules {
-		add(r.id, r.fn(v))
+		if r.fn != nil && !muted[r.id] {
+			add(r.id, r.fn(v))
+		}
 	}
-	add("pools", rulePools(v, base))
-	if base != nil {
+	if !muted["pools"] {
+		add("pools", rulePools(v, base))
+	}
+	if base != nil && !muted["regression"] {
 		add("regression", Regressions(v, base))
 	}
-	if len(slos) > 0 {
+	if len(slos) > 0 && !muted["slo-burn"] {
 		add("slo-burn", SLOFindings(EvaluateSLOs(v, base, slos)))
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -122,6 +165,11 @@ func DoctorWith(v *View, base *View, slos []SLO) []Finding {
 		}
 		return out[i].Score > out[j].Score
 	})
+	ix := newSubjectIndex(v)
+	for i := range out {
+		out[i].rawHint = out[i].Hint
+		out[i].Hint = ix.fillHint(out[i].Hint, ix.findingRefs(&out[i]))
+	}
 	return out
 }
 
@@ -217,7 +265,7 @@ func ruleOOMAndMemory(v *View) []Finding {
 	for _, e := range v.PodEntities() {
 		if r := e.Stats.Res; r != nil && r.MemMax > 0 {
 			ratio := float64(r.MemCurrent) / float64(r.MemMax)
-			if ratio >= 0.9 {
+			if ratio >= v.th("memory-near-limit-ratio") {
 				near = append(near, fmt.Sprintf("%s: %s of %s (%s)", e.Endpoint.Display(), Bytes(float64(r.MemCurrent)), Bytes(float64(r.MemMax)), Pct(ratio)))
 			}
 		}
@@ -227,7 +275,7 @@ func ruleOOMAndMemory(v *View) []Finding {
 	}
 	if len(near) > 0 {
 		out = append(out, Finding{Severity: SevWarn, Category: "memory",
-			Title:  fmt.Sprintf("%d pod(s) above 90%% of their memory limit", len(near)),
+			Title:  fmt.Sprintf("%d pod(s) above %s of their memory limit", len(near), Pct(v.th("memory-near-limit-ratio"))),
 			Detail: top(near, 10), Hint: "raise memory limits or fix the leak before the OOM killer does", Score: float64(len(near))})
 	}
 	if len(reclaim) > 0 {
@@ -296,7 +344,7 @@ func ruleDNSErrors(v *View) []Finding {
 		}
 		bad := d.RCodes["SERVFAIL"] + d.RCodes["REFUSED"] + d.Timeouts
 		r := ratio(float64(bad), float64(d.Queries))
-		if bad < 3 || r < 0.02 {
+		if bad < 3 || r < v.th("dns-error-ratio") {
 			continue
 		}
 		if r > 0.2 {
@@ -329,7 +377,7 @@ func ruleDNSSlow(v *View) []Finding {
 		if d == nil || d.Lat.Count < 20 {
 			continue
 		}
-		if p99 := d.Lat.P99(); p99 > 100e3 {
+		if p99 := d.Lat.P99(); p99 > v.th("dns-slow-p99-ms")*1e3 {
 			slow = append(slow, fmt.Sprintf("%s: p99 %s (p50 %s, %d lookups)", e.Endpoint.Display(), Dur(p99), Dur(d.Lat.P50()), d.Lat.Count))
 		}
 	}
@@ -370,7 +418,7 @@ func ruleRefused(v *View) []Finding {
 	var edges []*Edge
 	var total uint64
 	for _, e := range v.Edges {
-		if e.Stats.Refused >= 3 {
+		if float64(e.Stats.Refused) >= v.th("refused-min") {
 			edges = append(edges, e)
 			total += e.Stats.Refused
 		}
@@ -393,7 +441,7 @@ func ruleRefused(v *View) []Finding {
 func ruleTimeouts(v *View) []Finding {
 	var edges []*Edge
 	for _, e := range v.Edges {
-		if e.Stats.Timeouts >= 2 {
+		if float64(e.Stats.Timeouts) >= v.th("connect-timeouts-min") {
 			edges = append(edges, e)
 		}
 	}
@@ -445,7 +493,7 @@ func ruleRetrans(v *View) []Finding {
 	var lines []string
 	for _, e := range v.Edges {
 		conns := e.Stats.Connects + e.Stats.RTT.Count
-		if e.Stats.Retrans >= 20 && conns > 0 && float64(e.Stats.Retrans)/float64(conns) > 0.5 {
+		if float64(e.Stats.Retrans) >= v.th("retransmits-min") && conns > 0 && float64(e.Stats.Retrans)/float64(conns) > 0.5 {
 			lines = append(lines, fmt.Sprintf("%s: %d retransmits (%s/s), RTT p99 %s", edgeName(e), e.Stats.Retrans, Rate(v.PerSec(e.Stats.Retrans)), Dur(e.Stats.RTT.P99())))
 		}
 	}
@@ -479,7 +527,8 @@ func ruleDrops(v *View) []Finding {
 	byReason := map[string]uint64{}
 	examples := map[string]*model.Drop{}
 	for _, d := range v.Drops {
-		if benignDrops[d.Reason] {
+		// drops by packet filtering have their own finding (policy-denials)
+		if benignDrops[d.Reason] || isPolicyDrop(d.Reason) {
 			continue
 		}
 		byReason[d.Reason] += d.Count
@@ -518,7 +567,7 @@ func ruleConntrack(v *View) []Finding {
 		s := n.Stats
 		if s.ConntrackMax > 0 {
 			r := float64(s.ConntrackCount) / float64(s.ConntrackMax)
-			if r > 0.8 {
+			if r > v.th("conntrack-full-ratio") {
 				sev := SevWarn
 				if r > 0.95 {
 					sev = SevCrit
@@ -599,7 +648,7 @@ func ruleCrossZone(v *View) []Finding {
 	for _, c := range costs {
 		total += c.MonthlyUSD
 	}
-	if total < 1 {
+	if total < v.th("cross-zone-usd") {
 		return nil
 	}
 	f := Finding{Severity: SevInfo, Category: "cost",
@@ -664,7 +713,7 @@ func ruleRunQ(v *View) []Finding {
 		}
 		p99 := s.RunQ.P99()
 		share := ratio(float64(s.OffNs[model.StateRunQ]), float64(s.OnCPUNs))
-		if p99 < 20e3 || share < 0.05 {
+		if p99 < v.th("cpu-runqueue-p99-ms")*1e3 || share < 0.05 {
 			continue
 		}
 		line := fmt.Sprintf("%s: run queue p99 %s, waited %s for CPU per 1s on CPU", e.Endpoint.Display(), Dur(p99), Dur(share*1e6))
@@ -699,7 +748,7 @@ func ruleThrottle(v *View) []Finding {
 			continue
 		}
 		pct := float64(r.Throttled) / float64(r.Periods)
-		if pct < 0.25 {
+		if pct < v.th("cpu-throttled-ratio") {
 			continue
 		}
 		lines = append(lines, fmt.Sprintf("%s: throttled in %s of CFS periods (%s throttled, limit %dm)", e.Endpoint.Display(), Pct(pct), Dur(float64(r.ThrottledUs)), r.CPUQuotaMilli))
@@ -719,7 +768,7 @@ func ruleDisk(v *View) []Finding {
 		if io == nil || io.Lat.Count < 20 {
 			continue
 		}
-		if p99 := io.Lat.P99(); p99 > 50e3 {
+		if p99 := io.Lat.P99(); p99 > v.th("disk-slow-p99-ms")*1e3 {
 			lines = append(lines, fmt.Sprintf("%s: block I/O p99 %s (%s read, %s written)", e.Endpoint.Display(), Dur(p99), Bytes(float64(io.ReadBytes)), Bytes(float64(io.WriteBytes))))
 		}
 	}
@@ -731,37 +780,89 @@ func ruleDisk(v *View) []Finding {
 		Hint: "check volume IOPS/throughput limits and noisy neighbours on the same disk (`kubectl capybara nodes`)", Score: float64(len(lines))}}
 }
 
+// ruleHTTP reports failing and slow routes per workload. A call observed on
+// both ends is reported once, on the server (with the callers it fails
+// for); the client side is only reported for servers that are not observed
+// (external APIs, TLS).
 func ruleHTTP(v *View) []Finding {
-	var out []Finding
-	var errLines, slowLines []string
-	sev := SevWarn
-	for _, e := range v.Entities {
+	type agg struct {
+		workload, role, method, path string
+		ep                           model.HTTPEndpoint
+		pods                         int
+		worst                        *EntityView // replica with the highest error ratio
+		worstRatio                   float64
+	}
+	by := map[string]*agg{}
+	servers := map[string]bool{} // method+path served by an observed workload with errors
+	for _, e := range sortedEntities(v) {
 		for _, ep := range e.Stats.HTTP {
-			if ep.Role != "server" && e.Stats.HTTP["server "+ep.Method+" "+ep.Path] != nil {
-				continue
+			k := e.Endpoint.WorkloadKey() + "\x00" + ep.Role + " " + ep.Method + " " + ep.Path
+			a, ok := by[k]
+			if !ok {
+				a = &agg{workload: e.Endpoint.WorkloadKey(), role: ep.Role, method: ep.Method, path: ep.Path}
+				by[k] = a
 			}
-			if ep.Count >= 10 {
-				r := ratio(float64(ep.Errors()), float64(ep.Count))
-				if r > 0.01 {
-					if r > 0.1 {
-						sev = SevCrit
-					}
-					errLines = append(errLines, fmt.Sprintf("%s %s %s %s: %s 5xx (%d/%d)", e.Endpoint.Display(), ep.Role, ep.Method, ep.Path, Pct(r), ep.Errors(), ep.Count))
-				}
-				if ep.Role == "server" && ep.Lat.P99() > 1e6 {
-					slowLines = append(slowLines, fmt.Sprintf("%s %s %s: p99 %s (p50 %s)", e.Endpoint.Display(), ep.Method, ep.Path, Dur(ep.Lat.P99()), Dur(ep.Lat.P50())))
-				}
+			a.ep.Merge(ep)
+			a.pods++
+			if r := ratio(float64(ep.Errors()), float64(ep.Count)); ep.Count >= 10 && r > a.worstRatio {
+				a.worst, a.worstRatio = e, r
 			}
 		}
 	}
+	threshold := v.th("http-5xx-ratio")
+	failing := func(a *agg) bool {
+		return a.ep.Count >= 10 && ratio(float64(a.ep.Errors()), float64(a.ep.Count)) > threshold
+	}
+	keys := make([]string, 0, len(by))
+	for k, a := range by {
+		keys = append(keys, k)
+		if a.role == "server" && failing(a) {
+			servers[a.method+" "+a.path] = true
+		}
+	}
+	sort.Strings(keys)
+	callers := map[string][]string{} // method+path -> client workloads seeing the errors
+	for _, k := range keys {
+		if a := by[k]; a.role == "client" && failing(a) && servers[a.method+" "+a.path] {
+			callers[a.method+" "+a.path] = append(callers[a.method+" "+a.path], a.workload)
+		}
+	}
+	var out []Finding
+	var errLines, slowLines []string
+	sev := SevWarn
+	for _, k := range keys {
+		a := by[k]
+		if a.ep.Count < 10 {
+			continue
+		}
+		route := a.method + " " + a.path
+		if failing(a) && !(a.role == "client" && servers[route]) {
+			r := ratio(float64(a.ep.Errors()), float64(a.ep.Count))
+			if r > 0.1 {
+				sev = SevCrit
+			}
+			line := fmt.Sprintf("%s %s %s: %s 5xx (%d/%d)", a.workload, a.role, route, Pct(r), a.ep.Errors(), a.ep.Count)
+			if a.role == "client" {
+				line = fmt.Sprintf("%s calls to %s fail: %s 5xx (%d/%d)", a.workload, route, Pct(r), a.ep.Errors(), a.ep.Count)
+			}
+			if a.pods > 1 && a.worst != nil && a.worstRatio >= 1.5*r {
+				line += fmt.Sprintf("; worst replica %s %s", a.worst.Endpoint.Display(), Pct(a.worstRatio))
+			}
+			if c := callers[route]; len(c) > 0 {
+				line += "; callers affected: " + strings.Join(top(c, 3), ", ")
+			}
+			errLines = append(errLines, line)
+		}
+		if a.role == "server" && a.ep.Lat.P99() > v.th("http-slow-p99-ms")*1e3 {
+			slowLines = append(slowLines, fmt.Sprintf("%s %s: p99 %s (p50 %s)", a.workload, route, Dur(a.ep.Lat.P99()), Dur(a.ep.Lat.P50())))
+		}
+	}
 	if len(errLines) > 0 {
-		sort.Strings(errLines)
 		out = append(out, Finding{Severity: sev, Category: "http", Title: "HTTP 5xx errors", Detail: top(errLines, 10), Score: float64(len(errLines)),
-			Hint: "`kubectl capybara pod <pod>` shows what the failing server waits on (CPU, database, downstream calls); compare replicas with `outliers` and a recent deploy with `rollout <deployment>`"})
+			Hint: "`kubectl capybara pod <pod>` shows what the failing server waits on (CPU, database, downstream calls); compare replicas with `kubectl capybara outliers` and a recent deploy with `kubectl capybara rollout <deployment>`"})
 	}
 	if len(slowLines) > 0 {
-		sort.Strings(slowLines)
-		out = append(out, Finding{Severity: SevInfo, Category: "http", Title: "slow HTTP endpoints (p99 > 1s)", Detail: top(slowLines, 10), Score: float64(len(slowLines)),
+		out = append(out, Finding{Severity: SevInfo, Category: "http", Title: fmt.Sprintf("slow HTTP endpoints (p99 > %s)", Dur(v.th("http-slow-p99-ms")*1e3)), Detail: top(slowLines, 10), Score: float64(len(slowLines)),
 			Hint: "see where the time goes with `kubectl capybara pod <pod>` (waiting for CPU, database statements, dependencies) or `kubectl capybara profile <pod>`"})
 	}
 	return out
@@ -851,7 +952,7 @@ func firstLine(s string) string {
 func ruleOOMRisk(v *View) []Finding {
 	var out []Finding
 	for _, r := range OOMRisks(v) {
-		if r.ETA > time.Hour {
+		if r.ETA > time.Duration(v.th("oom-risk-minutes")*float64(time.Minute)) {
 			continue
 		}
 		sev := SevWarn
@@ -1012,7 +1113,7 @@ func ruleDB(v *View) []Finding {
 			if q.Count < 10 {
 				continue
 			}
-			if r := ratio(float64(q.Errors), float64(q.Count)); r > 0.01 {
+			if r := ratio(float64(q.Errors), float64(q.Count)); r > v.th("db-error-ratio") {
 				kinds := ""
 				if len(q.ErrorKinds) > 0 {
 					var ks []string
@@ -1024,7 +1125,7 @@ func ruleDB(v *View) []Finding {
 				errLines = append(errLines, fmt.Sprintf("%s %s: %s errors (%d/%d)%s %s", e.Endpoint.Display(), q.Proto, Pct(r), q.Errors, q.Count, kinds, q.Query))
 				score += r * 10
 			}
-			if p99 := q.Lat.P99(); p99 > 500e3 {
+			if p99 := q.Lat.P99(); p99 > v.th("db-slow-p99-ms")*1e3 {
 				slowLines = append(slowLines, fmt.Sprintf("%s %s: p99 %s, %s/s: %s", e.Endpoint.Display(), q.Proto, Dur(p99), Rate(v.PerSec(q.Count)), q.Query))
 				score += p99 / 1e6
 			}
@@ -1038,7 +1139,7 @@ func ruleDB(v *View) []Finding {
 	}
 	if len(slowLines) > 0 {
 		sort.Strings(slowLines)
-		out = append(out, Finding{Severity: SevWarn, Category: "db", Title: "slow database statements (p99 > 500ms)", Detail: top(slowLines, 10),
+		out = append(out, Finding{Severity: SevWarn, Category: "db", Title: fmt.Sprintf("slow database statements (p99 > %s)", Dur(v.th("db-slow-p99-ms")*1e3)), Detail: top(slowLines, 10),
 			Hint: "`kubectl capybara db` ranks statements by total time; look for missing indexes, lock waits or N+1 patterns", Score: score})
 	}
 	return out

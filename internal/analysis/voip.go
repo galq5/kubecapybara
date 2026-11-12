@@ -124,10 +124,8 @@ func (r VoIPRow) TopCodes(n int) string {
 
 // Voice quality thresholds (ITU-T G.114/G.1020 rules of thumb).
 const (
-	rtpLossWarn   = 0.01
-	rtpLossCrit   = 0.05
-	rtpJitterWarn = 30e3 // µs
-	sipPDDWarn    = 5e6  // µs post-dial delay p50
+	rtpLossCrit = 0.05
+	sipPDDWarn  = 5e6 // µs post-dial delay p50
 )
 
 func ruleVoIP(v *View) []Finding {
@@ -156,7 +154,7 @@ func ruleVoIP(v *View) []Finding {
 		if rtp == nil {
 			continue
 		}
-		if rtp.Expected >= 500 && rtp.LossRatio() >= rtpLossWarn {
+		if rtp.Expected >= 500 && rtp.LossRatio() >= v.th("rtp-loss-ratio") {
 			line := fmt.Sprintf("%s: %s of inbound RTP packets lost (%d of %d)", name, Pct(rtp.LossRatio()), rtp.Lost, rtp.Expected)
 			if w := worstStream(rtp); w != nil && w.Lost > 0 {
 				line += fmt.Sprintf("; worst stream from %s:%d (%s, %s lost)", w.Peer, w.PeerPort, nonEmpty(w.Codec, "?"), Pct(w.LossRatio()))
@@ -168,7 +166,7 @@ func ruleVoIP(v *View) []Finding {
 				lossSev = SevCrit
 			}
 		}
-		if rtp.Jitter.Count >= 5 && rtp.Jitter.P90() >= rtpJitterWarn {
+		if rtp.Jitter.Count >= 5 && rtp.Jitter.P90() >= v.th("rtp-jitter-ms")*1e3 {
 			line := fmt.Sprintf("%s: RTP jitter p90 %s, max %s", name, Dur(rtp.Jitter.P90()), Dur(float64(rtp.JitterMaxUs)))
 			if r.CPUWait >= 0.05 {
 				line += fmt.Sprintf("; the pod also waits %s for CPU per 1s on CPU", Dur(r.CPUWait*1e6))

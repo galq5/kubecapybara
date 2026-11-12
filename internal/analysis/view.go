@@ -144,6 +144,8 @@ type NodeView struct {
 type Options struct {
 	ClusterDomain string
 	CostPerGB     float64 // inter-zone transfer price per GB, per direction
+	// Doctor mutes rules and overrides thresholds.
+	Doctor DoctorConfig
 }
 
 // View is the merged, resolved picture of the cluster for a time window.

@@ -62,6 +62,11 @@ func main() {
 		base = analysis.Build(b.Baseline, b.Meta, analysis.Options{})
 	}
 	res := &tui.Result{View: v, Base: base, Findings: analysis.Doctor(v, base)}
+	var before []analysis.Finding
+	if base != nil {
+		before = analysis.Doctor(base, nil)
+	}
+	res.Problems = analysis.Triage(v, res.Findings, base, before)
 	opts := tui.Options{Source: "cluster agents in namespace capybara", Window: b.To.Sub(b.From).Round(time.Second)}
 	if err := os.MkdirAll(*out, 0o755); err != nil {
 		fail(err)
@@ -90,6 +95,9 @@ func main() {
 	}
 	if worst != nil {
 		shots = append(shots, shot{"edge-detail", "Network", tui.EdgeKey(worst)})
+	}
+	if len(res.Problems) > 0 {
+		shots = append(shots, shot{"problem", "Overview", tui.ProblemKey(&res.Problems[0])})
 	}
 	for _, s := range shots {
 		frame := tui.Frame(res, opts, *width, *height, tui.TabIndex(s.tab), s.detail)

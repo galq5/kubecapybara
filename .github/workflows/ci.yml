@@ -50,3 +50,6 @@ jobs:
           helm template capybara charts/kubecapybara -n observability \
             --set namespace.create=true --set agent.l7=true --set metrics.serviceMonitor.enabled=true \
             --set rbac.viewers.groups={sre} --set imagePullSecrets[0].name=ghcr > /dev/null
+          helm template capybara charts/kubecapybara --set controller.enabled=true --set hub.enabled=true \
+            --set 'controller.doctor.mute={internet-egress}' --set-json 'controller.doctor.thresholds={"http-5xx-ratio":0.05}' \
+            --set-json 'controller.slos=[{"name":"api","service":"shop/api","availability":99.5}]' > /dev/null

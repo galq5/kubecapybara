@@ -29,6 +29,9 @@ type Result struct {
 	View     *analysis.View
 	Base     *analysis.View
 	Findings []analysis.Finding
+	// Problems are the findings grouped by what they are about (see
+	// analysis.Triage).
+	Problems []analysis.Problem
 	Warnings []string
 	SLOs     []analysis.SLOStatus
 }
@@ -89,10 +92,6 @@ var (
 	podSorts  = []string{"cpu", "runq", "memory", "oom", "dns", "http", "name"}
 )
 
-// overviewDetails is how many evidence lines a finding shows on the
-// Overview tab until it is selected.
-const overviewDetails = 3
-
 // nodeDetails is how many nodes get a workload table on the Nodes tab
 // without a filter.
 const nodeDetails = 3
@@ -100,38 +99,41 @@ const nodeDetails = 3
 // ---------------------------------------------------------------- keys
 
 type keyMap struct {
-	Next, Prev, Jump, VoIP, Up, Down, Enter, Back, Filter, Sort, Hosts, Left, Right, Refresh, Help, Quit key.Binding
+	Next, Prev, Jump, VoIP, Up, Down, Enter, Back, Filter, Sort, Hosts, Left, Right, PrevSect, NextSect, Refresh, Help, Quit key.Binding
 }
 
 func newKeys() keyMap {
 	return keyMap{
-		Next:    key.NewBinding(key.WithKeys("tab", "right", "l"), key.WithHelp("tab/→", "next tab")),
-		Prev:    key.NewBinding(key.WithKeys("shift+tab", "left", "h"), key.WithHelp("⇧tab/←", "prev tab")),
-		Jump:    key.NewBinding(key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"), key.WithHelp("1-0", "jump to tab")),
-		VoIP:    key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "VoIP tab")),
-		Up:      key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:    key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		Enter:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "details")),
-		Back:    key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back / clear filter")),
-		Filter:  key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		Sort:    key.NewBinding(key.WithKeys("s", "S"), key.WithHelp("s/S", "sort")),
-		Hosts:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "host processes")),
-		Left:    key.NewBinding(key.WithKeys("<", ","), key.WithHelp("</>", "scroll sideways")),
-		Right:   key.NewBinding(key.WithKeys(">", ".")),
-		Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-		Help:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Next:   key.NewBinding(key.WithKeys("tab", "right", "l"), key.WithHelp("tab/→", "next tab")),
+		Prev:   key.NewBinding(key.WithKeys("shift+tab", "left", "h"), key.WithHelp("⇧tab/←", "prev tab")),
+		Jump:   key.NewBinding(key.WithKeys("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"), key.WithHelp("1-0", "jump to tab")),
+		VoIP:   key.NewBinding(key.WithKeys("v"), key.WithHelp("v", "VoIP tab")),
+		Up:     key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:   key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "details")),
+		Back:   key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back / clear filter")),
+		Filter: key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		Sort:   key.NewBinding(key.WithKeys("s", "S"), key.WithHelp("s/S", "sort")),
+		Hosts:  key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "host processes")),
+		Left:   key.NewBinding(key.WithKeys("<", ","), key.WithHelp("</>", "scroll sideways")),
+		Right:  key.NewBinding(key.WithKeys(">", ".")),
+		// sections of a long tab (Services: balance, outliers, pools...)
+		PrevSect: key.NewBinding(key.WithKeys("["), key.WithHelp("[/]", "prev/next section")),
+		NextSect: key.NewBinding(key.WithKeys("]")),
+		Refresh:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
 // ShortHelp lists the keys that do something on the current tab (bindings
 // that do not apply are disabled and left out by the help bubble).
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Next, k.Jump, k.Enter, k.Filter, k.Sort, k.Hosts, k.Left, k.Refresh, k.Help, k.Quit}
+	return []key.Binding{k.Next, k.Jump, k.Enter, k.Filter, k.Sort, k.Hosts, k.PrevSect, k.Left, k.Refresh, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Next, k.Prev, k.Jump, k.VoIP}, {k.Up, k.Down, k.Enter, k.Back}, {k.Filter, k.Sort, k.Hosts, k.Left}, {k.Refresh, k.Help, k.Quit}}
+	return [][]key.Binding{{k.Next, k.Prev, k.Jump, k.VoIP}, {k.Up, k.Down, k.Enter, k.Back}, {k.Filter, k.Sort, k.Hosts, k.PrevSect, k.Left}, {k.Refresh, k.Help, k.Quit}}
 }
 
 // ---------------------------------------------------------------- model
@@ -168,15 +170,18 @@ type model struct {
 	detail    string         // pod entity id or edge key being inspected
 	back      string         // tab to return to when the detail is closed
 	selected  map[string]string
-	showHosts bool              // Pods tab: include processes outside pods
-	voip      bool              // the data has SIP or RTP traffic
-	byName    map[string]string // display name -> entity id
+	showHosts bool // Pods tab: include processes outside pods
+	voip      bool // the data has SIP or RTP traffic
 
-	// Overview: the findings shown, the selected one and where each starts
-	findings   []analysis.Finding
-	findCursor int
-	findKey    string
-	findLines  [][2]int // first line and line count of each finding
+	backDetail string // detail to restore with it
+
+	// Overview: the problems shown, the selected one and where each starts
+	problems   []analysis.Problem
+	probCursor int
+	probKey    string
+	probLines  [][2]int // first line and line count of each problem
+
+	sections []section // of the text on screen, for [ and ]
 }
 
 func newModel(load Loader, opts Options) *model {
@@ -221,11 +226,10 @@ func (m *model) fetch() tea.Cmd {
 // setResult installs fresh data.
 func (m *model) setResult(res *Result) {
 	m.res, m.updated = res, time.Now()
-	m.voip = false
-	m.byName = make(map[string]string, len(res.View.Entities))
-	for id, e := range res.View.Entities {
-		m.byName[e.Endpoint.Display()] = id
+	if res.Problems == nil && len(res.Findings) > 0 {
+		res.Problems = analysis.Triage(res.View, res.Findings, res.Base, nil)
 	}
+	m.voip = false
 	for _, e := range res.View.Entities {
 		if e.Stats.SIP != nil || (e.Stats.RTP != nil && e.Stats.RTP.PacketsIn+e.Stats.RTP.PacketsOut > 0) {
 			m.voip = true
@@ -252,26 +256,54 @@ func (m *model) tableTab() bool {
 	return m.detail == "" && (m.tab == tabNetwork || m.tab == tabPods)
 }
 
-// findingList reports whether the selectable list of findings is shown.
-func (m *model) findingList() bool {
+// problemList reports whether the selectable list of problems is shown.
+func (m *model) problemList() bool {
 	return m.detail == "" && m.tab == tabOverview && m.res != nil
 }
+
+// problemDetail returns the problem opened on the Overview tab, if any.
+func (m *model) problemDetail() *analysis.Problem {
+	key, ok := strings.CutPrefix(m.detail, problemPrefix)
+	if !ok || m.tab != tabOverview || m.res == nil {
+		return nil
+	}
+	for i := range m.res.Problems {
+		if m.res.Problems[i].Key == key {
+			return &m.res.Problems[i]
+		}
+	}
+	return nil
+}
+
+// problemPod returns the pod to open from a problem: the one its evidence
+// names most.
+func problemPod(p *analysis.Problem) string {
+	if p == nil || len(p.Pods) == 0 {
+		return ""
+	}
+	return p.Pods[0]
+}
+
+const problemPrefix = "problem:"
 
 // syncKeys enables the bindings that apply to what is on screen, so the
 // footer only advertises keys that do something.
 func (m *model) syncKeys() {
 	m.keys.Sort.SetEnabled(m.tableTab())
 	m.keys.Hosts.SetEnabled(m.tableTab() && m.tab == tabPods)
-	m.keys.Enter.SetEnabled(m.tableTab() || (m.findingList() && m.findingTarget() != ""))
+	m.keys.Enter.SetEnabled(m.tableTab() || (m.problemList() && len(m.problems) > 0) || problemPod(m.problemDetail()) != "")
 	m.keys.Left.SetEnabled(!m.tableTab())
 	m.keys.Right.SetEnabled(!m.tableTab())
+	m.keys.PrevSect.SetEnabled(!m.tableTab() && len(m.sections) > 1)
+	m.keys.NextSect.SetEnabled(!m.tableTab() && len(m.sections) > 1)
 	m.keys.VoIP.SetEnabled(m.hasVoIP())
 }
 
 func (m *model) contentHeight() int {
 	h := m.height - 3 // header, tabs, footer
 	if m.help.ShowAll {
-		h -= 4
+		// the full help is as tall as its longest column of enabled keys
+		h -= lipgloss.Height(m.help.View(m.keys)) - 1 + len(m.glossary())
 	}
 	if h < 3 {
 		h = 3
@@ -353,13 +385,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case m.detail != "":
 				m.detail = ""
 				if m.back != "" {
-					m.tab, m.back = m.back, ""
+					m.tab, m.detail = m.back, m.backDetail
+					m.back, m.backDetail = "", ""
 				}
 			default:
 				m.filter.SetValue("")
 			}
 			m.refresh(true)
-			m.showFinding()
+			m.showProblem()
 		case key.Matches(msg, m.keys.Sort):
 			n := len(edgeSorts)
 			if m.tab == tabPods {
@@ -378,6 +411,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp.ScrollLeft(8)
 		case key.Matches(msg, m.keys.Right):
 			m.vp.ScrollRight(8)
+		case key.Matches(msg, m.keys.NextSect):
+			for _, sec := range m.sections {
+				if sec.line > m.vp.YOffset {
+					m.vp.SetYOffset(sec.line)
+					break
+				}
+			}
+		case key.Matches(msg, m.keys.PrevSect):
+			for i := len(m.sections) - 1; i >= 0; i-- {
+				if m.sections[i].line < m.vp.YOffset {
+					m.vp.SetYOffset(m.sections[i].line)
+					break
+				}
+			}
 		case key.Matches(msg, m.keys.Refresh):
 			if !m.loading {
 				m.loading = true
@@ -388,20 +435,28 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.detail = m.rowIDs[c]
 				m.refresh(true)
 			}
-		case key.Matches(msg, m.keys.Enter) && m.findingList():
-			if id := m.findingTarget(); id != "" {
-				m.back, m.tab, m.detail = tabOverview, tabPods, id
+		case key.Matches(msg, m.keys.Enter) && m.problemList():
+			// a problem: everything found about it, with what to do
+			if m.probCursor >= 0 && m.probCursor < len(m.problems) {
+				m.detail = problemPrefix + m.problems[m.probCursor].Key
 				m.refresh(true)
 			}
-		case m.findingList() && (key.Matches(msg, m.keys.Up) || key.Matches(msg, m.keys.Down)):
-			if key.Matches(msg, m.keys.Up) {
-				m.findCursor--
-			} else {
-				m.findCursor++
+		case key.Matches(msg, m.keys.Enter) && m.problemDetail() != nil:
+			// the pod its evidence names most
+			if id := problemPod(m.problemDetail()); id != "" && m.res.View.Entities[id] != nil {
+				m.back, m.backDetail = tabOverview, m.detail
+				m.tab, m.detail = tabPods, id
+				m.refresh(true)
 			}
-			m.findKey = ""
+		case m.problemList() && (key.Matches(msg, m.keys.Up) || key.Matches(msg, m.keys.Down)):
+			if key.Matches(msg, m.keys.Up) {
+				m.probCursor--
+			} else {
+				m.probCursor++
+			}
+			m.probKey = ""
 			m.refresh(false)
-			m.showFinding()
+			m.showProblem()
 		default:
 			if m.tableTab() {
 				var cmd tea.Cmd
@@ -463,9 +518,9 @@ func (m *model) switchTab(name string) {
 		return
 	}
 	m.tab = name
-	m.detail, m.back = "", ""
+	m.detail, m.back, m.backDetail = "", "", ""
 	m.refresh(true)
-	m.showFinding()
+	m.showProblem()
 }
 
 // refresh rebuilds the content of the current tab.
@@ -473,11 +528,13 @@ func (m *model) refresh(resetScroll bool) {
 	if !m.ready {
 		return
 	}
+	m.syncKeys()
+	m.resize() // what is on screen decides the height of the help
 	if m.res != nil && m.tableTab() {
 		m.buildTable()
 		return
 	}
-	var b bytes.Buffer
+	var b textBuf
 	switch {
 	case m.res == nil && m.err != nil:
 		fmt.Fprintf(&b, "error: %v\n", m.err)
@@ -486,7 +543,21 @@ func (m *model) refresh(resetScroll bool) {
 	default:
 		m.renderText(&b)
 	}
-	m.vp.SetContent(b.String())
+	m.sections = b.sections
+	content := b.String()
+	// a tab longer than the screen starts with what it holds
+	if len(m.sections) > 1 && strings.Count(content, "\n") > m.vp.Height && !m.problemList() {
+		var names []string
+		for _, sec := range m.sections {
+			names = append(names, sec.title)
+		}
+		index := render.Wrap(render.Style{Width: m.st.Width}, "sections ([ and ] jump): "+strings.Join(names, " · "), 2)
+		content = m.st.Dim(index) + "\n" + content
+		for i := range m.sections {
+			m.sections[i].line += strings.Count(index, "\n") + 1
+		}
+	}
+	m.vp.SetContent(content)
 	if resetScroll {
 		m.vp.GotoTop()
 		m.vp.SetXOffset(0)
@@ -751,45 +822,14 @@ func sortPods(pods []*analysis.EntityView, by string, oom map[string]time.Durati
 
 // ---------------------------------------------------------------- overview
 
-func findingKey(f analysis.Finding) string {
-	k := f.Rule + "|" + f.Title
-	if len(f.Subjects) > 0 {
-		k = f.Rule + "|" + f.Subjects[0]
-	}
-	return k
-}
-
-// findingTarget returns the entity the selected finding is about, if it is
-// in the current data: enter opens it. Findings that do not name their
-// subjects mention the pod in their evidence ("ns/pod: ...").
-func (m *model) findingTarget() string {
-	if m.res == nil || m.findCursor < 0 || m.findCursor >= len(m.findings) {
-		return ""
-	}
-	fd := m.findings[m.findCursor]
-	for _, id := range fd.Subjects {
-		if m.res.View.Entities[id] != nil {
-			return id
-		}
-	}
-	for _, line := range append([]string{fd.Title}, fd.Detail...) {
-		for _, word := range strings.Fields(line) {
-			if id, ok := m.byName[strings.TrimRight(word, ":,")]; ok {
-				return id
-			}
-		}
-	}
-	return ""
-}
-
-// showFinding scrolls the Overview so the selected finding is on screen.
-func (m *model) showFinding() {
-	if !m.findingList() || m.findCursor < 0 || m.findCursor >= len(m.findLines) {
+// showProblem scrolls the Overview so the selected problem is on screen.
+func (m *model) showProblem() {
+	if !m.problemList() || m.probCursor < 0 || m.probCursor >= len(m.probLines) {
 		return
 	}
-	first, n := m.findLines[m.findCursor][0], m.findLines[m.findCursor][1]
+	first, n := m.probLines[m.probCursor][0], m.probLines[m.probCursor][1]
 	switch {
-	case m.findCursor == 0:
+	case m.probCursor == 0:
 		m.vp.GotoTop()
 	case first < m.vp.YOffset:
 		m.vp.SetYOffset(first)
@@ -798,7 +838,9 @@ func (m *model) showFinding() {
 	}
 }
 
-func (m *model) renderOverview(b *bytes.Buffer) {
+// renderOverview lists the problems: one or two lines each, and one line
+// per finding for the selected one. Enter opens a problem.
+func (m *model) renderOverview(b *textBuf) {
 	st, f, v := m.st, m.filt(), m.res.View
 	for _, w := range m.res.Warnings {
 		fmt.Fprintln(b, render.Wrap(st, st.Warn("! "+w), 2))
@@ -808,58 +850,60 @@ func (m *model) renderOverview(b *bytes.Buffer) {
 		render.SLOs(b, st, m.res.SLOs)
 		fmt.Fprintln(b)
 	}
-	m.findings = m.findings[:0]
-	counts := map[analysis.Severity]int{}
-	for _, fd := range m.res.Findings {
-		if render.MatchFinding(fd, f) {
-			m.findings = append(m.findings, fd)
-			counts[fd.Severity]++
+	m.problems = m.problems[:0]
+	var crit, warn int
+	for i := range m.res.Problems {
+		p := &m.res.Problems[i]
+		if !render.MatchProblem(p, f) {
+			continue
+		}
+		m.problems = append(m.problems, *p)
+		switch {
+		case p.Kind == "advice":
+		case p.Severity == analysis.SevCrit:
+			crit++
+		default:
+			warn++
 		}
 	}
-	// stay on the same finding when the data refreshes
-	if m.findKey != "" {
-		for i, fd := range m.findings {
-			if findingKey(fd) == m.findKey {
-				m.findCursor = i
+	// stay on the same problem when the data refreshes
+	if m.probKey != "" {
+		for i := range m.problems {
+			if m.problems[i].Key == m.probKey {
+				m.probCursor = i
 				break
 			}
 		}
 	}
-	m.findCursor = max(0, min(m.findCursor, len(m.findings)-1))
-	m.findLines = m.findLines[:0]
-	if len(m.findings) == 0 {
-		if len(m.res.Findings) == 0 {
+	m.probCursor = max(0, min(m.probCursor, len(m.problems)-1))
+	m.probLines = m.probLines[:0]
+	if len(m.problems) == 0 {
+		if len(m.res.Problems) == 0 {
 			fmt.Fprintln(b, st.OK("✔ no problems detected in this window"))
 		} else {
 			fmt.Fprintln(b, st.Dim("no finding matches the filter"))
 		}
 	} else {
-		m.findKey = findingKey(m.findings[m.findCursor])
-		fmt.Fprintln(b, render.Wrap(st, fmt.Sprintf("%d finding(s): %s %d  %s %d  %s %d  %s", len(m.findings),
-			st.Crit("crit"), counts[analysis.SevCrit], st.Warn("warn"), counts[analysis.SevWarn], st.Info("info"), counts[analysis.SevInfo],
-			st.Dim("· ↑/↓ select · enter opens the pod a finding is about")), 2))
+		m.probKey = m.problems[m.probCursor].Key
+		fmt.Fprintln(b, render.Wrap(st, fmt.Sprintf("%d problem(s): %s %d  %s %d  %s", crit+warn, st.Crit("crit"), crit, st.Warn("warn"), warn,
+			st.Dim("· findings about one workload are one problem, likely causes first · ↑/↓ select · enter: evidence and what to do")), 2))
 		fmt.Fprintln(b)
 	}
 	inner := st
 	inner.Width = max(st.Width-2, 0)
-	for i, fd := range m.findings {
+	for i := range m.problems {
+		p := &m.problems[i]
 		var blk bytes.Buffer
-		details := overviewDetails
-		if i == m.findCursor {
-			details = 0
-		}
-		render.Finding(&blk, inner, fd, details)
-		if i == m.findCursor {
-			if id := m.findingTarget(); id != "" {
-				fmt.Fprintln(&blk, st.Dim("       enter: open "+v.Entities[id].Endpoint.Display()))
-			}
+		render.ProblemHeader(&blk, inner, p, m.res.Problems)
+		if i == m.probCursor {
+			render.ProblemLines(&blk, inner, p)
 		}
 		gutter := "  "
-		if i == m.findCursor {
+		if i == m.probCursor {
 			gutter = st.Accent("▌") + " "
 		}
 		lines := strings.Split(strings.TrimRight(blk.String(), "\n"), "\n")
-		m.findLines = append(m.findLines, [2]int{bytes.Count(b.Bytes(), []byte("\n")), len(lines)})
+		m.probLines = append(m.probLines, [2]int{bytes.Count(b.Bytes(), []byte("\n")), len(lines)})
 		for _, l := range lines {
 			fmt.Fprintln(b, gutter+l)
 		}
@@ -869,9 +913,42 @@ func (m *model) renderOverview(b *bytes.Buffer) {
 	render.Edges(b, st, v, f, "rtt", 8)
 }
 
+// renderProblem shows one problem in full.
+func (m *model) renderProblem(b *textBuf, p *analysis.Problem) {
+	st := m.st
+	render.ProblemHeader(b, st, p, m.res.Problems)
+	nav := "esc: back to the problems"
+	if id := problemPod(p); id != "" && m.res.View.Entities[id] != nil {
+		nav = "enter: open " + m.res.View.Entities[id].Endpoint.Display() + " (where its time goes, dependencies, last crash) · " + nav
+	}
+	render.Note(b, st, "     "+nav)
+	fmt.Fprintln(b)
+	render.ProblemDetail(b, st, p, 6)
+}
+
+// textBuf collects the text of a tab and where its sections start.
+type textBuf struct {
+	bytes.Buffer
+	sections []section
+}
+
+type section struct {
+	title string
+	line  int
+}
+
+// MarkSection is called by render.Section before it prints a title.
+func (b *textBuf) MarkSection(title string) {
+	line := bytes.Count(b.Bytes(), []byte("\n"))
+	if b.Len() > 0 {
+		line++ // a blank line comes first
+	}
+	b.sections = append(b.sections, section{title, line})
+}
+
 // ---------------------------------------------------------------- text tabs
 
-func (m *model) renderText(b *bytes.Buffer) {
+func (m *model) renderText(b *textBuf) {
 	v := m.res.View
 	f := m.filt()
 	st := m.st
@@ -881,7 +958,12 @@ func (m *model) renderText(b *bytes.Buffer) {
 	}
 	switch m.tab {
 	case tabOverview:
-		m.renderOverview(b)
+		if p := m.problemDetail(); p != nil {
+			m.renderProblem(b, p)
+		} else {
+			m.detail = "" // the problem is gone
+			m.renderOverview(b)
+		}
 	case tabNetwork:
 		// look the edge up in the current data so the view refreshes
 		var edge *analysis.Edge
@@ -901,6 +983,7 @@ func (m *model) renderText(b *bytes.Buffer) {
 		render.Pod(b, st, v, m.detail)
 		fmt.Fprintln(b, st.Dim(back))
 	case tabServices:
+		render.Section(b, st, "Load balance per Service")
 		render.Services(b, st, v, f)
 		render.Section(b, st, "Replicas worse than their siblings")
 		render.Outliers(b, st, v, f)
@@ -909,7 +992,7 @@ func (m *model) renderText(b *bytes.Buffer) {
 	case tabDNS:
 		render.DNS(b, st, v, f)
 	case tabApps:
-		fmt.Fprintln(b, st.Title("HTTP routes"))
+		render.Section(b, st, "HTTP routes")
 		render.HTTP(b, st, v, f, false)
 		render.Section(b, st, "Database statements")
 		render.DB(b, st, v, f, false)
@@ -971,11 +1054,12 @@ func (m *model) titleLine() string {
 	}
 	if m.res != nil {
 		var crit, warn int
-		for _, f := range m.res.Findings {
-			switch f.Severity {
-			case analysis.SevCrit:
+		for i := range m.res.Problems {
+			switch p := &m.res.Problems[i]; {
+			case p.Kind == "advice":
+			case p.Severity == analysis.SevCrit:
 				crit++
-			case analysis.SevWarn:
+			default:
 				warn++
 			}
 		}
@@ -1064,17 +1148,41 @@ func (m *model) View() string {
 				legend = "a: host processes on"
 			}
 		}
-		hint := hintStyle.Render(fmt.Sprintf("sort: %s (s/S) · %d rows · enter: details · %s", sorts[m.sortIdx[m.tab]], len(m.rowIDs), legend))
+		hint := hintStyle.Render(fmt.Sprintf("sort: %s (s/S) · %d rows · enter: details · ?: what the columns mean · %s", sorts[m.sortIdx[m.tab]], len(m.rowIDs), legend))
 		body = m.clip(hint) + "\n" + m.tbl.View()
 	} else {
 		body = m.vp.View()
 	}
 
 	footer := m.help.View(m.keys)
+	if m.help.ShowAll {
+		for _, l := range m.glossary() {
+			body += "\n" + hintStyle.Render(l)
+		}
+	}
 	if m.filtering || m.filter.Value() != "" {
 		footer = m.filter.View()
 	}
 	return m.titleLine() + "\n" + m.tabBar() + "\n" + body + "\n" + footer
+}
+
+// what the columns of the two tables mean, shown with the full help (?)
+var glossaries = map[string]string{
+	tabNetwork: "RTT = round trip time the kernel measures on the connection · CONN = time to establish a connection · CONN/s = new connections · " +
+		"RETR/s = retransmitted segments (loss) · REFUSED = connects answered with a reset (nothing listens) · TIMEOUT = connects that got no answer · " +
+		"SEEN = the end that was observed: client, server or both · ⇄ = the two ends are in different zones",
+	tabPods: "CPU = cores used · CPU TREND = the last samples · RUNQ p99 = how long threads wait for a CPU at worst · WAIT CPU = share of the time " +
+		"the pod wanted a CPU and did not get one · MEM% = memory used of the limit · OOM IN = when memory reaches the limit at the current growth · " +
+		"THROTTLE = share of scheduler periods cut short by the CPU limit · DNS err = failed lookups · 5xx = share of failed HTTP responses",
+}
+
+// glossary returns the wrapped column legend of the table on screen.
+func (m *model) glossary() []string {
+	g, ok := glossaries[m.tab]
+	if !ok || !m.tableTab() || m.width <= 0 {
+		return nil
+	}
+	return strings.Split(render.Wrap(render.Style{Width: m.width}, g, 0), "\n")
 }
 
 func truncate(s string, n int) string {
@@ -1099,6 +1207,10 @@ func Frame(res *Result, opts Options, width, height, tab int, detail string) str
 	m.refresh(true)
 	return m.View()
 }
+
+// ProblemKey exposes the detail key of a problem on the Overview tab (for
+// screenshots).
+func ProblemKey(p *analysis.Problem) string { return problemPrefix + p.Key }
 
 // EdgeKey exposes the detail key of an edge (for screenshots).
 func EdgeKey(e *analysis.Edge) string { return edgeKey(e) }

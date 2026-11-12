@@ -162,7 +162,7 @@ func FilterEdges(v *analysis.View, f Filter) []*analysis.Edge {
 		if !(f.ns(e.Client) || f.ns(e.Server)) {
 			continue
 		}
-		if !f.match(e.Client.Display(), e.Server.Display(), fmt.Sprint(e.Port), e.Client.Workload, e.Server.Workload) {
+		if !f.match(e.Client.Display(), e.Server.Display(), fmt.Sprint(e.Port), e.Client.WorkloadKey(), e.Server.WorkloadKey()) {
 			continue
 		}
 		edges = append(edges, e)

@@ -97,6 +97,20 @@ data:
   slos.yaml: |
     {{- dict "slos" $c.slos | toYaml | nindent 4 }}
 {{- end }}
+{{- $doctor := or $c.doctor.mute $c.doctor.thresholds }}
+{{- if $doctor }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-doctor
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "capybara.labels" . | nindent 4 }}
+data:
+  doctor.yaml: |
+    {{- $c.doctor | toYaml | nindent 4 }}
+{{- end }}
 {{- if and (not $c.notifications.existingSecret) (or $c.notifications.webhookURL $c.notifications.slackWebhookURL) }}
 ---
 apiVersion: v1
@@ -140,9 +154,9 @@ spec:
         {{- include "capybara.labels" . | nindent 8 }}
         app.kubernetes.io/name: capybara-controller
         app.kubernetes.io/instance: {{ .Release.Name }}
-      {{- if $c.slos }}
+      {{- if or $c.slos $doctor }}
       annotations:
-        checksum/slos: {{ dict "slos" $c.slos | toYaml | sha256sum }}
+        checksum/config: {{ dict "slos" $c.slos "doctor" $c.doctor | toYaml | sha256sum }}
       {{- end }}
     spec:
       serviceAccountName: {{ $fullname }}-controller
@@ -194,6 +208,9 @@ spec:
             {{- if $c.slos }}
             - --slo-file=/etc/capybara/slos.yaml
             {{- end }}
+            {{- if $doctor }}
+            - --doctor-config=/etc/capybara-doctor/doctor.yaml
+            {{- end }}
             {{- range $c.extraArgs }}
             - {{ . }}
             {{- end }}
@@ -215,16 +232,30 @@ spec:
               drop: ["ALL"]
           resources:
             {{- toYaml $c.resources | nindent 12 }}
-          {{- if $c.slos }}
+          {{- if or $c.slos $doctor }}
           volumeMounts:
+            {{- if $c.slos }}
             - name: slos
               mountPath: /etc/capybara
               readOnly: true
+            {{- end }}
+            {{- if $doctor }}
+            - name: doctor
+              mountPath: /etc/capybara-doctor
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if $c.slos }}
+      {{- if or $c.slos $doctor }}
       volumes:
+        {{- if $c.slos }}
         - name: slos
           configMap:
             name: {{ $fullname }}-slos
+        {{- end }}
+        {{- if $doctor }}
+        - name: doctor
+          configMap:
+            name: {{ $fullname }}-doctor
+        {{- end }}
       {{- end }}
 {{- end }}

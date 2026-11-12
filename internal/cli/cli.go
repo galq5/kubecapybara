@@ -51,12 +51,17 @@ type options struct {
 	agentTokenSecret string
 	sloFile          string
 	slos             []analysis.SLO
+	flat             bool
+	doctorFile       string
+	mute             []string
+	doctor           analysis.DoctorConfig
 
 	src client.Source
 	cs  kubernetes.Interface
 
-	baseCache *analysis.View
-	baseAt    time.Time
+	baseCache    *analysis.View
+	baseFindings []analysis.Finding
+	baseAt       time.Time
 }
 
 // NewRoot builds the root command.
@@ -84,6 +89,9 @@ Run without arguments for the interactive dashboard.`,
 			if offline(cmd) {
 				return nil
 			}
+			if f := cmd.Flags().Lookup("list-rules"); f != nil && f.Changed {
+				return nil // describes the doctor: needs no agents
+			}
 			return o.init()
 		},
 	}
@@ -110,6 +118,8 @@ Run without arguments for the interactive dashboard.`,
 	pf.IntVar(&o.top, "top", 0, "with capybara-hub: only fetch the N busiest connections/pods plus the N with the most errors (0: all)")
 	pf.DurationVar(&o.refresh, "refresh", 5*time.Second, "dashboard refresh interval")
 	pf.StringVar(&o.sloFile, "slo-file", os.Getenv("CAPYBARA_SLO_FILE"), "YAML file with SLO definitions (default $CAPYBARA_SLO_FILE)")
+	pf.StringVar(&o.doctorFile, "doctor-config", os.Getenv("CAPYBARA_DOCTOR_CONFIG"), "YAML file muting doctor rules and overriding their thresholds (default $CAPYBARA_DOCTOR_CONFIG; see doctor --list-rules)")
+	pf.StringSliceVar(&o.mute, "mute", nil, "doctor rules to leave out, comma separated (see doctor --list-rules)")
 
 	root.AddCommand(
 		o.cmdTop(), o.cmdDoctor(), o.cmdEdges(), o.cmdPods(), o.cmdPod(), o.cmdDNS(), o.cmdHTTP(), o.cmdNodes(),
@@ -183,6 +193,17 @@ func (o *options) init() error {
 			return err
 		}
 		o.slos = slos
+	}
+	if o.doctorFile != "" {
+		c, err := analysis.LoadDoctorConfig(o.doctorFile)
+		if err != nil {
+			return err
+		}
+		o.doctor = c
+	}
+	o.doctor.Mute = append(o.doctor.Mute, o.mute...)
+	if err := o.doctor.Validate(); err != nil {
+		return err
 	}
 	switch {
 	case o.fromFile != "":
@@ -265,7 +286,7 @@ func (o *options) init() error {
 }
 
 func (o *options) aopts() analysis.Options {
-	return analysis.Options{ClusterDomain: o.clusterDomain, CostPerGB: o.costPerGB}
+	return analysis.Options{ClusterDomain: o.clusterDomain, CostPerGB: o.costPerGB, Doctor: o.doctor}
 }
 
 func (o *options) timeRange() (time.Time, time.Time) {
@@ -300,6 +321,11 @@ func (o *options) load(ctx context.Context, withBase bool) (*tui.Result, error) 
 		res.Base = o.baselineView(ctx, from, meta)
 	}
 	res.Findings = analysis.DoctorWith(res.View, res.Base, o.slos)
+	var baseFindings []analysis.Finding
+	if res.Base != nil {
+		baseFindings = o.baseFindings
+	}
+	res.Problems = analysis.Triage(res.View, res.Findings, res.Base, baseFindings)
 	if len(o.slos) > 0 {
 		res.SLOs = analysis.EvaluateSLOs(res.View, res.Base, o.slos)
 	}
@@ -330,7 +356,8 @@ func (o *options) baselineView(ctx context.Context, from time.Time, meta *k8smet
 	if b.To.IsZero() || b.To.After(from) {
 		b.To = from
 	}
-	o.baseCache, o.baseAt = b, time.Now()
+	// what the doctor would have said then: tells new problems from ongoing ones
+	o.baseCache, o.baseFindings, o.baseAt = b, analysis.Doctor(b, nil), time.Now()
 	return b
 }
 
@@ -407,6 +434,23 @@ func (o *options) runDoctorText(ctx context.Context) error {
 	st := o.style()
 	render.Header(os.Stdout, st, res.View, o.src.Describe())
 	fmt.Println()
-	render.Doctor(os.Stdout, st, res.Findings, o.filt())
+	if o.flat {
+		render.Doctor(os.Stdout, st, res.Findings, o.filt())
+	} else {
+		render.Problems(os.Stdout, st, res.Problems, o.filt())
+	}
 	return nil
+}
+
+// listRules prints the doctor rules and their tunable thresholds.
+func listRules(w io.Writer) {
+	fmt.Fprintln(w, "Rules (mute with --mute a,b or `mute:` in --doctor-config):")
+	for _, r := range analysis.Rules() {
+		fmt.Fprintf(w, "  %-18s %s\n", r.ID, r.Description)
+	}
+	fmt.Fprintln(w, "\nThresholds (override under `thresholds:` in --doctor-config):")
+	for _, t := range analysis.Thresholds {
+		fmt.Fprintf(w, "  %-26s %-8g %s (rule %s)\n", t.Name, t.Default, t.Help, t.Rule)
+	}
+	fmt.Fprintln(w, "\nExample --doctor-config file:\n  mute: [internet-egress, undeclared-ports]\n  thresholds:\n    http-5xx-ratio: 0.05\n    cpu-throttled-ratio: 0.5")
 }
