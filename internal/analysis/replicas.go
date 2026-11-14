@@ -332,12 +332,14 @@ func SLOFindings(st []SLOStatus) []Finding {
 		if s.Requests == 0 {
 			continue
 		}
-		long := s.BaseBurn()
+		// each SLI must burn fast in both windows: a latency burn now and an
+		// availability burn in the baseline is not a sustained burn
+		baseAvail, baseLat := s.BaseAvailBurn, s.BaseLatBurn
 		if !s.HasBase {
-			long = s.Burn()
+			baseAvail, baseLat = s.AvailBurn, s.LatencyBurn
 		}
 		var sev Severity
-		switch b := min(s.Burn(), long); {
+		switch b := max(min(s.AvailBurn, baseAvail), min(s.LatencyBurn, baseLat)); {
 		case b >= 14.4:
 			sev = SevCrit
 		case b >= 6:

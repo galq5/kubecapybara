@@ -29,6 +29,7 @@ import (
 type options struct {
 	hub           string
 	top           int
+	topSet        bool // --top given explicitly (0 then overrides the hub's default)
 	refresh       time.Duration
 	kubeconfig    string
 	kubeContext   string
@@ -84,6 +85,10 @@ Run without arguments for the interactive dashboard.`,
 			if cmd.Name() == "version" {
 				return nil
 			}
+			// the root's flag: profile commands shadow --top with their own
+			if f := cmd.Root().PersistentFlags().Lookup("top"); f != nil {
+				o.topSet = f.Changed
+			}
 			return o.init()
 		},
 	}
@@ -107,7 +112,7 @@ Run without arguments for the interactive dashboard.`,
 	pf.BoolVar(&o.noK8s, "no-k8s", false, "do not query the Kubernetes API for names (with --agent)")
 	pf.StringVarP(&o.filter, "filter", "f", "", "only show rows containing this text")
 	pf.StringVar(&o.hub, "hub", "auto", "capybara-hub: auto (use it when deployed in the agent namespace), off (query every agent), or a URL")
-	pf.IntVar(&o.top, "top", 0, "with capybara-hub: only fetch the N busiest connections/pods plus the N with the most errors (0: all)")
+	pf.IntVar(&o.top, "top", 0, "with capybara-hub: only fetch the N busiest connections/pods plus the N with the most errors (0: all; unset: the hub's --default-top)")
 	pf.DurationVar(&o.refresh, "refresh", 5*time.Second, "dashboard refresh interval")
 	pf.StringVar(&o.sloFile, "slo-file", os.Getenv("CAPYBARA_SLO_FILE"), "YAML file with SLO definitions (default $CAPYBARA_SLO_FILE)")
 
@@ -224,7 +229,7 @@ func (o *options) init() error {
 		o.src = ds
 	case strings.HasPrefix(o.hub, "http://") || strings.HasPrefix(o.hub, "https://"):
 		hs := &client.HubSource{URL: o.hub, Token: o.agentToken, Namespace: o.agentNS, TokenSecret: o.agentTokenSecret,
-			ScopeNamespace: o.namespace, Top: o.top}
+			ScopeNamespace: o.namespace, Top: o.top, TopSet: o.topSet}
 		if cs, err := o.kubeClient(); err == nil && !o.noK8s {
 			hs.CS = cs // reads the token Secret when --agent-token is not set
 		}
@@ -243,7 +248,7 @@ func (o *options) init() error {
 			cancel()
 			if err == nil && svc != "" {
 				o.src = &client.HubSource{CS: cs, Namespace: o.agentNS, Service: svc, Port: port,
-					Token: o.agentToken, TokenSecret: o.agentTokenSecret, ScopeNamespace: o.namespace, Top: o.top}
+					Token: o.agentToken, TokenSecret: o.agentTokenSecret, ScopeNamespace: o.namespace, Top: o.top, TopSet: o.topSet}
 				return nil
 			}
 		}

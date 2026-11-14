@@ -368,14 +368,14 @@ func (v *View) buildEdges(listeners map[string]string) {
 					f.clientSide = p.Clone()
 					f.clientOwner = v.entityKeyNode(p.Owner, s.Node)
 				} else {
-					f.clientSide.Add(p)
+					f.clientSide.AddConcurrent(p) // another owner or node
 				}
 			} else {
 				if f.serverSide == nil {
 					f.serverSide = p.Clone()
 					f.serverOwner = v.entityKeyNode(p.Owner, s.Node)
 				} else {
-					f.serverSide.Add(p)
+					f.serverSide.AddConcurrent(p)
 				}
 			}
 		}
@@ -431,7 +431,7 @@ func (v *View) buildEdges(listeners map[string]string) {
 		} else if e.Side != side {
 			e.Side = "both"
 		}
-		e.Stats.Add(stats)
+		e.Stats.AddConcurrent(stats) // flows of one edge are distinct connections
 		for n := range f.nodes {
 			e.Nodes = appendUniq(e.Nodes, n)
 		}

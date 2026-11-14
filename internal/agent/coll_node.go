@@ -7,7 +7,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -64,7 +63,7 @@ func conntrackStats(path string) map[string]uint64 {
 
 func (c *nodeCollector) Collect(w *Window) {
 	now := time.Now()
-	ns := model.NodeStats{CPUs: runtime.NumCPU(), SampledAt: now}
+	ns := model.NodeStats{CPUs: len(onlineCPUs()), SampledAt: now}
 	if b, err := os.ReadFile(c.proc("loadavg")); err == nil {
 		if f := strings.Fields(string(b)); len(f) > 0 {
 			ns.Load1, _ = strconv.ParseFloat(f[0], 64)

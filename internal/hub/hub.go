@@ -403,6 +403,8 @@ type SnapshotsResponse struct {
 	Meta *k8smeta.Meta `json:"meta,omitempty"`
 	// Agents is the number of agents asked.
 	Agents int `json:"agents"`
+	// Scoped is true when the snapshots (and Meta) were scoped.
+	Scoped bool `json:"scoped,omitempty"`
 }
 
 // Handler returns the hub HTTP API:
@@ -531,7 +533,7 @@ func (h *Hub) snapshots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snaps, errs := h.Snapshots(r.Context(), from, to, q.Get("lite") == "1")
-	resp := SnapshotsResponse{Errors: errs, Agents: int(h.stats.agents.Load())}
+	resp := SnapshotsResponse{Errors: errs, Agents: int(h.stats.agents.Load()), Scoped: sc.Active()}
 	var meta *k8smeta.Meta
 	if sc.Active() || q.Get("meta") == "1" {
 		meta = h.Meta()

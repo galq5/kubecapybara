@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -89,7 +88,7 @@ func (c *profileCollector) Profile(ctx context.Context, entity string, d time.Du
 		Sample: uint64(hz),
 		Bits:   unix.PerfBitFreq | unix.PerfBitDisabled,
 	}
-	for cpu := 0; cpu < runtime.NumCPU(); cpu++ {
+	for _, cpu := range onlineCPUs() {
 		fd, err := unix.PerfEventOpen(&attr, -1, cpu, -1, unix.PERF_FLAG_FD_CLOEXEC)
 		if err != nil {
 			continue // offline CPU

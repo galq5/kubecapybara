@@ -18,10 +18,14 @@ func TestPerfMap(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(proc, fmt.Sprint(pid), "status"), []byte("Name:\tjava\nNSpid:\t4242\t1\n"), 0o644)
 	os.WriteFile(filepath.Join(proc, fmt.Sprint(pid), "maps"), []byte(""), 0o644)
-	os.WriteFile(filepath.Join(root, "perf-1.map"), []byte("7f0000001000 100 Lcom/shop/Checkout;::price\n7f0000002000 80 Ljava/util/HashMap;::get\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "perf-1.map"), []byte("7f0000002000 80 Ljava/util/HashMap;::get\n7f0000001100 20 Lcom/shop/Cart;::add\n7f0000001000 100 Lcom/shop/Checkout;::price\n"), 0o644)
 	s := New(proc)
 	if got := s.User(uint32(pid), 0x7f0000001050); got != "Lcom/shop/Checkout;::price" {
 		t.Fatalf("got %q", got)
+	}
+	// starts exactly where the previous symbol ends (listed earlier in the file)
+	if got := s.User(uint32(pid), 0x7f0000001100); got != "Lcom/shop/Cart;::add" {
+		t.Fatalf("adjacent symbol: %q", got)
 	}
 	if got := s.User(uint32(pid), 0x7f0000001500); got != "[unknown] 0x7f0000001500" {
 		t.Fatalf("gap between symbols: %q", got)

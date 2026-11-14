@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"runtime"
 	"strings"
 	"time"
 
@@ -33,7 +32,7 @@ func openCounters(cfg uint64, cgroupFD int) ([]int, error) {
 		pid = cgroupFD
 	}
 	var fds []int
-	for cpu := 0; cpu < runtime.NumCPU(); cpu++ {
+	for _, cpu := range onlineCPUs() {
 		fd, err := unix.PerfEventOpen(&attr, pid, cpu, -1, flags)
 		if err != nil {
 			if errors.Is(err, unix.ENODEV) { // offline CPU
