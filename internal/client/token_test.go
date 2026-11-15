@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,9 +13,25 @@ import (
 func TestSecretTokenRecoversAfterFailureAndRotation(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	ctx := context.Background()
-	var cache secretToken
+	clock := time.Unix(1000, 0)
+	cache := secretToken{now: func() time.Time { return clock }}
 	if token := cache.get(ctx, cs, "agent", "auth"); token != "" {
 		t.Fatal("absent Secret returned a token")
+	}
+	gets := func() int {
+		n := 0
+		for _, a := range cs.Actions() {
+			if a.GetVerb() == "get" && a.GetResource().Resource == "secrets" {
+				n++
+			}
+		}
+		return n
+	}
+	for i := 0; i < 10; i++ {
+		cache.get(ctx, cs, "agent", "auth")
+	}
+	if n := gets(); n != 1 {
+		t.Fatalf("missing Secret looked up %d times instead of once", n)
 	}
 	secrets := cs.CoreV1().Secrets("agent")
 	obj, err := secrets.Create(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "auth"},
@@ -22,6 +39,10 @@ func TestSecretTokenRecoversAfterFailureAndRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if token := cache.get(ctx, cs, "agent", "auth"); token != "" {
+		t.Fatal("failed lookup retried before tokenRetry")
+	}
+	clock = clock.Add(tokenRetry)
 	if token := cache.get(ctx, cs, "agent", "auth"); token != "initial" {
 		t.Fatal("lookup did not recover after the Secret was created")
 	}

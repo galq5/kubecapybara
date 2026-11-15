@@ -28,8 +28,8 @@ type dnsCollector struct {
 
 	mu      sync.Mutex
 	cur     *Window
-	clients map[dnsKey]dnsPending
-	servers map[dnsKey]dnsPending
+	clients *dnsTable
+	servers *dnsTable
 }
 
 type dnsKey struct {
@@ -46,13 +46,79 @@ type dnsPending struct {
 	qtype  string
 }
 
+// dnsLoose is a query's identity without the server's address, which NAT can
+// rewrite between the query and its reply.
+type dnsLoose struct {
+	client     string
+	clientPort uint16
+	id         uint16
+	cgroup     uint64
+}
+
+func (k dnsKey) loose() dnsLoose { return dnsLoose{k.client, k.clientPort, k.id, k.cgroup} }
+
+// dnsTable holds queries waiting for their reply. Replies match their query
+// by server too, so one query sent to several resolvers matches each reply.
+// A reply whose source no query went to falls back to the oldest query with
+// the same client socket and ID: a host network client querying a Service
+// through kube-proxy sends to the backend (DNAT happens before the egress
+// hook) but its reply arrives from the Service IP (translated back before
+// the ingress hook).
+type dnsTable struct {
+	byKey   map[dnsKey]dnsPending
+	byLoose map[dnsLoose][]dnsKey
+}
+
+func newDNSTable() *dnsTable {
+	return &dnsTable{byKey: map[dnsKey]dnsPending{}, byLoose: map[dnsLoose][]dnsKey{}}
+}
+
+func (t *dnsTable) put(k dnsKey, p dnsPending) {
+	if _, ok := t.byKey[k]; !ok {
+		l := k.loose()
+		t.byLoose[l] = append(t.byLoose[l], k)
+	}
+	t.byKey[k] = p
+}
+
+func (t *dnsTable) take(k dnsKey) (dnsPending, bool) {
+	p, ok := t.byKey[k]
+	if !ok {
+		keys := t.byLoose[k.loose()]
+		if len(keys) == 0 {
+			return dnsPending{}, false
+		}
+		k = keys[0]
+		p = t.byKey[k]
+	}
+	t.remove(k)
+	return p, true
+}
+
+func (t *dnsTable) remove(k dnsKey) {
+	delete(t.byKey, k)
+	l := k.loose()
+	keys := t.byLoose[l]
+	for i, x := range keys {
+		if x == k {
+			keys = append(keys[:i:i], keys[i+1:]...)
+			break
+		}
+	}
+	if len(keys) == 0 {
+		delete(t.byLoose, l)
+	} else {
+		t.byLoose[l] = keys
+	}
+}
+
 func (c *dnsCollector) Name() string { return "dns" }
 
 func (c *dnsCollector) Start(a *Agent) error {
 	c.a = a
 	c.cur = NewWindow(time.Time{}, time.Time{})
-	c.clients = map[dnsKey]dnsPending{}
-	c.servers = map[dnsKey]dnsPending{}
+	c.clients = newDNSTable()
+	c.servers = newDNSTable()
 	if err := bpf.LoadDnsObjects(&c.objs, nil); err != nil {
 		return fmt.Errorf("load: %w", err)
 	}
@@ -120,12 +186,12 @@ func (c *dnsCollector) handle(ev *bpf.DnsDnsEvent, msg *dnsparse.Message) {
 		p := dnsPending{ts: ev.Ts, entity: entity, name: msg.Name, qtype: msg.Type}
 		key := dnsKey{src, dst, ev.Sport, ev.Dport, msg.ID, ev.Cgroup}
 		if egress {
-			c.clients[key] = p
+			c.clients.put(key, p)
 			st := c.client(entity)
 			st.Queries++
 			st.Name(msg.Name).Count++
 		} else {
-			c.servers[key] = p
+			c.servers.put(key, p)
 			st := c.server(entity)
 			st.Queries++
 			st.Name(msg.Name).Count++
@@ -140,12 +206,10 @@ func (c *dnsCollector) handle(ev *bpf.DnsDnsEvent, msg *dnsparse.Message) {
 		st   *model.DNSStats
 	)
 	if !egress {
-		pend, ok = c.clients[key]
-		delete(c.clients, key)
+		pend, ok = c.clients.take(key)
 		st = c.client(entity)
 	} else {
-		pend, ok = c.servers[key]
-		delete(c.servers, key)
+		pend, ok = c.servers.take(key)
 		st = c.server(entity)
 	}
 	if !ok {
@@ -217,9 +281,9 @@ func (c *dnsCollector) Collect(w *Window) {
 	// read the clock under the lock: a query recorded while we waited for it
 	// is newer than an earlier reading, and now-p.ts would wrap around
 	now := monoNow()
-	for k, p := range c.clients {
+	for k, p := range c.clients.byKey {
 		if now > p.ts && now-p.ts > uint64(dnsTimeout) {
-			delete(c.clients, k)
+			c.clients.remove(k)
 			st := c.client(p.entity)
 			st.Timeouts++
 			st.Name(p.name).Timeouts++
@@ -230,9 +294,9 @@ func (c *dnsCollector) Collect(w *Window) {
 			})
 		}
 	}
-	for k, p := range c.servers {
+	for k, p := range c.servers.byKey {
 		if now > p.ts && now-p.ts > uint64(dnsTimeout) {
-			delete(c.servers, k)
+			c.servers.remove(k)
 			c.server(p.entity).Timeouts++
 		}
 	}

@@ -17,7 +17,7 @@ import (
 func testDNSCollector(t *testing.T) *dnsCollector {
 	t.Helper()
 	a := &Agent{resolver: cgroups.NewResolver(t.TempDir()), rec: NewRecorder(), clock: newClock(), status: map[string]string{}}
-	return &dnsCollector{a: a, cur: NewWindow(a.clock.wall(0), a.clock.wall(0)), clients: map[dnsKey]dnsPending{}, servers: map[dnsKey]dnsPending{}}
+	return &dnsCollector{a: a, cur: NewWindow(a.clock.wall(0), a.clock.wall(0)), clients: newDNSTable(), servers: newDNSTable()}
 }
 
 // A query stamped after the collector read the clock (or delivered out of
@@ -25,12 +25,12 @@ func testDNSCollector(t *testing.T) *dnsCollector {
 func TestDNSTimestampsDoNotWrap(t *testing.T) {
 	c := testDNSCollector(t)
 	future := monoNow() + 1e9
-	c.clients[dnsKey{client: "10.0.0.1", server: "::", clientPort: 1234, id: 7}] = dnsPending{ts: future, entity: "pod:a", name: "db.example.com", qtype: "A"}
-	c.servers[dnsKey{client: "10.0.0.1", server: "::", clientPort: 1234, id: 7}] = dnsPending{ts: future, entity: "pod:dns", name: "db.example.com", qtype: "A"}
+	c.clients.put(dnsKey{client: "10.0.0.1", server: "::", clientPort: 1234, id: 7}, dnsPending{ts: future, entity: "pod:a", name: "db.example.com", qtype: "A"})
+	c.servers.put(dnsKey{client: "10.0.0.1", server: "::", clientPort: 1234, id: 7}, dnsPending{ts: future, entity: "pod:dns", name: "db.example.com", qtype: "A"})
 	w := NewWindow(c.a.clock.wall(0), c.a.clock.wall(0))
 	c.Collect(w)
-	if len(c.clients) != 1 || len(c.servers) != 1 {
-		t.Fatalf("pending queries dropped: %d clients, %d servers", len(c.clients), len(c.servers))
+	if len(c.clients.byKey) != 1 || len(c.servers.byKey) != 1 {
+		t.Fatalf("pending queries dropped: %d clients, %d servers", len(c.clients.byKey), len(c.servers.byKey))
 	}
 	for id, e := range w.Entities {
 		if (e.DNS != nil && e.DNS.Timeouts > 0) || (e.DNSServer != nil && e.DNSServer.Timeouts > 0) {
@@ -176,6 +176,24 @@ func TestDNSMatchesParallelResolvers(t *testing.T) {
 	}
 	if got := c.cur.Entities["cg:1"].DNS.Responses; got != 2 {
 		t.Fatalf("two valid DNS replies became %d", got)
+	}
+}
+
+func TestDNSMatchesReplyFromServiceIP(t *testing.T) {
+	c := testDNSCollector(t)
+	// host network client: the query leaves DNATed to a CoreDNS pod, the
+	// reply arrives translated back to the Service IP
+	query := &bpf.DnsDnsEvent{Ts: 1000, Cgroup: 1, Sport: 45678, Dport: 53, Egress: 1,
+		Saddr: [16]uint8{15: 1}, Daddr: [16]uint8{15: 2}}
+	c.handle(query, &dnsparse.Message{ID: 7, Name: "a.example", Type: "A"})
+	c.handle(&bpf.DnsDnsEvent{Ts: 5000, Cgroup: 1, Sport: 53, Dport: 45678,
+		Saddr: [16]uint8{15: 10}, Daddr: query.Saddr},
+		&dnsparse.Message{ID: 7, Name: "a.example", Type: "A", Response: true, RCode: "NOERROR"})
+	if got := c.cur.Entities["cg:1"].DNS.Responses; got != 1 {
+		t.Fatalf("reply from the Service IP not matched: %d responses", got)
+	}
+	if len(c.clients.byKey) != 0 || len(c.clients.byLoose) != 0 {
+		t.Fatalf("matched query left pending: %v %v", c.clients.byKey, c.clients.byLoose)
 	}
 }
 

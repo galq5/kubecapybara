@@ -98,3 +98,23 @@ func TestControllerFindingOwnership(t *testing.T) {
 		t.Fatalf("expected an independent finding for each controller, got %d", count)
 	}
 }
+
+func TestPartialFailureStillDeletesExpiredFindings(t *testing.T) {
+	c, _, _, now := newTest(t)
+	f := analysis.Finding{Rule: "cpu-throttling", Severity: analysis.SevCrit, Title: "bad", Subjects: []string{"pod:uid-1"}}
+	ctx := context.Background()
+	if err := c.Reconcile(ctx, []analysis.Finding{f}, testView()); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(c.cfg.ResolveAfter + time.Minute)
+	if err := c.Reconcile(ctx, nil, testView()); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(c.cfg.KeepResolved + time.Minute)
+	if err := c.reconcile(ctx, nil, testView(), false); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(list(t, c)); n != 0 {
+		t.Fatalf("expired resolved finding kept during partial failure: %d left", n)
+	}
+}

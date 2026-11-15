@@ -150,6 +150,9 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 	}
 
 	for _, e := range v.Edges {
+		if e.Client.ID == e.Server.ID {
+			continue // a pod talking to itself over loopback: never subject to policy
+		}
 		if ids[e.Server.ID] {
 			if e.Client.Kind == KindHost || e.Client.Kind == KindLocal {
 				continue // kubelet probes / node-local traffic are always allowed

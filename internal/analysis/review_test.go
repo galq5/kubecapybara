@@ -103,3 +103,24 @@ func TestNetworkPolicyRejectsOverbroadSelector(t *testing.T) {
 		}
 	}
 }
+
+func TestNetworkPolicyIgnoresLoopback(t *testing.T) {
+	_, m := fixture(t)
+	p := m.Pods["pay-old"]
+	s := &model.Snapshot{Node: p.Node, From: time.Now().Add(-time.Minute), To: time.Now()}
+	for _, side := range []string{"client", "server"} {
+		s.Pairs = append(s.Pairs, &model.Pair{Client: "127.0.0.1", Server: "127.0.0.1", Port: 15000, Side: side, Owner: "pod:" + p.UID, Connects: 5})
+	}
+	v := Build([]*model.Snapshot{s}, m, Options{})
+	out, err := SuggestNetworkPolicy(v, "shop", "Deployment/payments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var np networkingv1.NetworkPolicy
+	if err := yaml.Unmarshal([]byte(out), &np); err != nil {
+		t.Fatal(err)
+	}
+	if len(np.Spec.Ingress) != 0 || len(np.Spec.Egress) != 0 {
+		t.Fatalf("loopback traffic became policy rules:\n%s", out)
+	}
+}

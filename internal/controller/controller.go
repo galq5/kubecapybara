@@ -239,13 +239,11 @@ func (c *Controller) reconcile(ctx context.Context, findings []analysis.Finding,
 		}
 	}
 
-	if !complete {
-		return nil
-	}
 	list, err := c.dyn.Resource(GVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: labelManaged + "=true," + labelInstance + "=" + c.instance})
 	if err != nil {
 		return err
 	}
+	held := 0
 	for i := range list.Items {
 		obj := &list.Items[i]
 		if obj.GetLabels()[labelInstance] != c.instance {
@@ -264,6 +262,10 @@ func (c *Controller) reconcile(ctx context.Context, findings []analysis.Finding,
 			if err != nil || now.Sub(lt) < c.cfg.ResolveAfter {
 				continue
 			}
+			if !complete {
+				held++
+				continue
+			}
 			_ = unstructured.SetNestedField(obj.Object, stateResolved, "status", "state")
 			_ = unstructured.SetNestedField(obj.Object, ts, "status", "resolvedAt")
 			if _, err := res.Update(ctx, obj, metav1.UpdateOptions{}); err != nil {
@@ -280,6 +282,9 @@ func (c *Controller) reconcile(ctx context.Context, findings []analysis.Finding,
 				}
 			}
 		}
+	}
+	if held > 0 {
+		c.log.Warn("not resolving findings: some agents returned no data", "findings", held)
 	}
 	return nil
 }
