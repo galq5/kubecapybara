@@ -91,3 +91,15 @@ func TestLoopbackOneSidedAndHostNetworking(t *testing.T) {
 		t.Fatal("hostNetwork connection split")
 	}
 }
+
+func TestNetworkPolicyRejectsOverbroadSelector(t *testing.T) {
+	for _, labels := range []map[string]string{nil, {"app": "shared"}} {
+		meta := &k8smeta.Meta{Pods: map[string]*k8smeta.Pod{
+			"a": {UID: "a", Namespace: "ns", Name: "a", Workload: "Pod/a", Labels: labels},
+			"b": {UID: "b", Namespace: "ns", Name: "b", Workload: "Pod/b", Labels: labels},
+		}}
+		if policy, err := SuggestNetworkPolicy(Build(nil, meta, Options{}), "ns", "Pod/a"); err == nil {
+			t.Fatalf("generated an overbroad policy:\n%s", policy)
+		}
+	}
+}

@@ -25,8 +25,8 @@ func testDNSCollector(t *testing.T) *dnsCollector {
 func TestDNSTimestampsDoNotWrap(t *testing.T) {
 	c := testDNSCollector(t)
 	future := monoNow() + 1e9
-	c.clients[dnsKey{"10.0.0.1", 1234, 7}] = dnsPending{ts: future, entity: "pod:a", name: "db.example.com", qtype: "A"}
-	c.servers[dnsKey{"10.0.0.1", 1234, 7}] = dnsPending{ts: future, entity: "pod:dns", name: "db.example.com", qtype: "A"}
+	c.clients[dnsKey{client: "10.0.0.1", server: "::", clientPort: 1234, id: 7}] = dnsPending{ts: future, entity: "pod:a", name: "db.example.com", qtype: "A"}
+	c.servers[dnsKey{client: "10.0.0.1", server: "::", clientPort: 1234, id: 7}] = dnsPending{ts: future, entity: "pod:dns", name: "db.example.com", qtype: "A"}
 	w := NewWindow(c.a.clock.wall(0), c.a.clock.wall(0))
 	c.Collect(w)
 	if len(c.clients) != 1 || len(c.servers) != 1 {
@@ -158,5 +158,68 @@ func TestRoundLatency(t *testing.T) {
 		if got := roundLatency(in).String(); got != want {
 			t.Errorf("roundLatency(%s) = %s, want %s", in, got, want)
 		}
+	}
+}
+
+func TestDNSMatchesParallelResolvers(t *testing.T) {
+	c := testDNSCollector(t)
+	query := &bpf.DnsDnsEvent{Ts: 1000, Cgroup: 1, Sport: 45678, Dport: 53, Egress: 1,
+		Saddr: [16]uint8{15: 1}, Daddr: [16]uint8{15: 2}}
+	msg := &dnsparse.Message{ID: 7, Name: "a.example", Type: "A"}
+	c.handle(query, msg)
+	query.Daddr[15] = 3
+	c.handle(query, msg)
+	for _, addr := range []uint8{2, 3} {
+		c.handle(&bpf.DnsDnsEvent{Ts: 5000, Cgroup: 1, Sport: 53, Dport: 45678,
+			Saddr: [16]uint8{15: addr}, Daddr: query.Saddr},
+			&dnsparse.Message{ID: 7, Name: msg.Name, Type: msg.Type, Response: true, RCode: "NOERROR"})
+	}
+	if got := c.cur.Entities["cg:1"].DNS.Responses; got != 2 {
+		t.Fatalf("two valid DNS replies became %d", got)
+	}
+}
+
+func TestAdjacentWindowBoundaries(t *testing.T) {
+	start := time.Now().Truncate(time.Hour)
+	for _, interval := range []time.Duration{time.Second, time.Minute} {
+		fineKeep := time.Hour
+		if interval == time.Minute {
+			fineKeep = 0
+		}
+		store := NewStore(fineKeep, time.Hour)
+		for i := 0; i < 3; i++ {
+			from := start.Add(time.Duration(i) * interval)
+			w := NewWindow(from, from.Add(interval))
+			w.Entity("pod:a").DNS = &model.DNSStats{Queries: 1}
+			store.Add(w)
+		}
+		for i := 0; i < 2; i++ {
+			from := start.Add(time.Duration(i) * interval)
+			w := store.Query(from, from.Add(interval))
+			if got := w.Entities["pod:a"].DNS.Queries; got != 1 {
+				t.Fatalf("%s window %d includes %d queries, want 1", interval, i, got)
+			}
+		}
+	}
+}
+
+type metricsWriterFunc func([]byte) (int, error)
+
+func (f metricsWriterFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestMetricsWritesOutsideCollectionLock(t *testing.T) {
+	m := newMetrics(nil)
+	m.observe(NewWindow(time.Now(), time.Now()))
+	wrote := false
+	m.write(metricsWriterFunc(func(p []byte) (int, error) {
+		wrote = true
+		if !m.mu.TryLock() {
+			t.Fatal("metrics response holds the collection lock")
+		}
+		m.mu.Unlock()
+		return len(p), nil
+	}))
+	if !wrote {
+		t.Fatal("no metrics were written")
 	}
 }

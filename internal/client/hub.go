@@ -48,10 +48,10 @@ type HubSource struct {
 	Top            int
 	TopSet         bool
 
-	tokenOnce sync.Once
-	metaMu    sync.Mutex
-	meta      *k8smeta.Meta
-	metaAt    time.Time
+	tokenCache secretToken
+	metaMu     sync.Mutex
+	meta       *k8smeta.Meta
+	metaAt     time.Time
 	// hubScoped: the hub scoped a response we did not ask to scope (its
 	// default top): its metadata is pruned and must be fetched every time
 	hubScoped bool
@@ -90,20 +90,11 @@ func (h *HubSource) Describe() string {
 	return d
 }
 
-func (h *HubSource) token(ctx context.Context) string {
-	h.tokenOnce.Do(func() {
-		if h.Token != "" || h.CS == nil || h.TokenSecret == "" {
-			return
-		}
-		if s, err := h.CS.CoreV1().Secrets(h.Namespace).Get(ctx, h.TokenSecret, metav1.GetOptions{}); err == nil {
-			h.Token = strings.TrimSpace(string(s.Data["token"]))
-		}
-	})
-	return h.Token
-}
-
 func (h *HubSource) get(ctx context.Context, path string, q url.Values) ([]byte, error) {
-	tok := h.token(ctx)
+	tok := h.Token
+	if tok == "" {
+		tok = h.tokenCache.get(ctx, h.CS, h.Namespace, h.TokenSecret)
+	}
 	if h.URL == "" {
 		req := h.CS.CoreV1().RESTClient().Get().Namespace(h.Namespace).Resource("services").SubResource("proxy").
 			Name(utilnet.JoinSchemeNamePort("http", h.Service, strconv.Itoa(h.Port))).Suffix(path)
@@ -116,6 +107,9 @@ func (h *HubSource) get(ctx context.Context, path string, q url.Values) ([]byte,
 			req = req.SetHeader(TokenHeader, tok)
 		}
 		b, err := req.DoRaw(ctx)
+		if apierrors.IsUnauthorized(err) || (err != nil && strings.Contains(string(b), "invalid "+TokenHeader)) {
+			h.tokenCache.invalidate(tok)
+		}
 		if apierrors.IsForbidden(err) {
 			return nil, fmt.Errorf("capybara-hub %s/%s: %w (needs get on services/proxy in %s; or bypass the hub with --hub=off)", h.Namespace, h.Service, err, h.Namespace)
 		}
@@ -148,6 +142,9 @@ func (h *HubSource) get(ctx context.Context, path string, q url.Values) ([]byte,
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		h.tokenCache.invalidate(tok)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("capybara-hub %s: %s: %s", path, resp.Status, string(b))

@@ -31,6 +31,8 @@ func (a *Agent) SaveState() error {
 	if a.cfg.StateDir == "" {
 		return nil
 	}
+	a.saveMu.Lock()
+	defer a.saveMu.Unlock()
 	if err := os.MkdirAll(a.cfg.StateDir, 0o700); err != nil {
 		return err
 	}

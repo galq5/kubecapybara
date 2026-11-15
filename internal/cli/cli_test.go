@@ -2,7 +2,9 @@ package cli
 
 import (
 	"io"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -55,5 +57,17 @@ func TestOfflineCommandsNeedNoKubeconfig(t *testing.T) {
 	root.SetErr(io.Discard)
 	if err := root.Execute(); err == nil {
 		t.Error("doctor without a cluster should fail")
+	}
+}
+
+func TestIncidentRejectsAggregateBundle(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "bundle.json")
+	if err := os.WriteFile(file, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := NewRoot("test")
+	cmd.SetArgs([]string{"--from-file", file, "incident"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "requires live time buckets") {
+		t.Fatalf("unexpected replay result: %v", err)
 	}
 }

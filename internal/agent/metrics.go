@@ -3,7 +3,9 @@ package agent
 import (
 	"fmt"
 	"io"
+	"maps"
 	"math"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -224,18 +226,25 @@ func (m *metrics) observe(w *Window) {
 
 func (m *metrics) write(w io.Writer) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	byName := map[string][]*promSeries{}
+	byName := map[string][]promSeries{}
 	for _, s := range m.vals {
-		byName[s.name] = append(byName[s.name], s)
+		series := *s
+		if s.hist != nil {
+			hist := *s.hist
+			hist.B = slices.Clone(hist.B)
+			series.hist = &hist
+		}
+		byName[s.name] = append(byName[s.name], series)
 	}
+	help, types := maps.Clone(m.help), maps.Clone(m.types)
+	m.mu.Unlock()
 	names := make([]string, 0, len(byName))
 	for n := range byName {
 		names = append(names, n)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", name, m.help[name], name, m.types[name])
+		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", name, help[name], name, types[name])
 		ss := byName[name]
 		sort.Slice(ss, func(i, j int) bool { return ss[i].labels < ss[j].labels })
 		for _, s := range ss {

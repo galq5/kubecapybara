@@ -33,9 +33,10 @@ type dnsCollector struct {
 }
 
 type dnsKey struct {
-	ip   string
-	port uint16
-	id   uint16
+	client, server         string
+	clientPort, serverPort uint16
+	id                     uint16
+	cgroup                 uint64
 }
 
 type dnsPending struct {
@@ -117,7 +118,7 @@ func (c *dnsCollector) handle(ev *bpf.DnsDnsEvent, msg *dnsparse.Message) {
 
 	if !msg.Response {
 		p := dnsPending{ts: ev.Ts, entity: entity, name: msg.Name, qtype: msg.Type}
-		key := dnsKey{src, ev.Sport, msg.ID}
+		key := dnsKey{src, dst, ev.Sport, ev.Dport, msg.ID, ev.Cgroup}
 		if egress {
 			c.clients[key] = p
 			st := c.client(entity)
@@ -132,7 +133,7 @@ func (c *dnsCollector) handle(ev *bpf.DnsDnsEvent, msg *dnsparse.Message) {
 		return
 	}
 
-	key := dnsKey{dst, ev.Dport, msg.ID}
+	key := dnsKey{dst, src, ev.Dport, ev.Sport, msg.ID, ev.Cgroup}
 	var (
 		pend dnsPending
 		ok   bool

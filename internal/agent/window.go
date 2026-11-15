@@ -121,12 +121,12 @@ func (s *Store) Add(w *Window) {
 	}
 }
 
-// Query merges all data overlapping [from, to].
+// Query merges all data overlapping [from, to).
 func (s *Store) Query(from, to time.Time) *Window {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := NewWindow(time.Time{}, time.Time{})
-	overlaps := func(w *Window) bool { return w.End.After(from) && !w.Start.After(to) }
+	overlaps := func(w *Window) bool { return from.Before(to) && w.End.After(from) && w.Start.Before(to) }
 	coarse := s.coarse
 	if s.pending != nil {
 		coarse = append(coarse[:len(coarse):len(coarse)], s.pending)

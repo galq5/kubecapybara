@@ -75,8 +75,7 @@ type KubeSource struct {
 	meta    *k8smeta.Meta
 	metaTTL time.Duration
 
-	tokenOnce sync.Once
-	token     string
+	tokenCache secretToken
 }
 
 // NewKubeSource creates a source for agents deployed in namespace ns.
@@ -103,22 +102,6 @@ func (k *KubeSource) agents(ctx context.Context) ([]corev1.Pod, error) {
 	return out, nil
 }
 
-// agentToken reads the agent API token from its Secret (once). A missing or
-// forbidden Secret yields no token: agents without authentication still work
-// and agents requiring one answer 401 with a clear message.
-func (k *KubeSource) agentToken(ctx context.Context) string {
-	k.tokenOnce.Do(func() {
-		if k.TokenSecret == "" {
-			return
-		}
-		s, err := k.CS.CoreV1().Secrets(k.Namespace).Get(ctx, k.TokenSecret, metav1.GetOptions{})
-		if err == nil {
-			k.token = strings.TrimSpace(string(s.Data["token"]))
-		}
-	})
-	return k.token
-}
-
 func (k *KubeSource) get(ctx context.Context, pod, path string, params map[string]string) ([]byte, error) {
 	req := k.CS.CoreV1().RESTClient().Get().
 		Namespace(k.Namespace).Resource("pods").SubResource("proxy").
@@ -127,11 +110,13 @@ func (k *KubeSource) get(ctx context.Context, pod, path string, params map[strin
 	for key, v := range params {
 		req = req.Param(key, v)
 	}
-	if t := k.agentToken(ctx); t != "" {
+	t := k.tokenCache.get(ctx, k.CS, k.Namespace, k.TokenSecret)
+	if t != "" {
 		req = req.SetHeader(TokenHeader, t)
 	}
 	b, err := req.DoRaw(ctx)
-	if apierrors.IsUnauthorized(err) || strings.Contains(string(b), "invalid "+TokenHeader) {
+	if apierrors.IsUnauthorized(err) || (err != nil && strings.Contains(string(b), "invalid "+TokenHeader)) {
+		k.tokenCache.invalidate(t)
 		return nil, fmt.Errorf("agent rejected the request: need read access to secret %s/%s holding the agent token: %w", k.Namespace, k.TokenSecret, err)
 	}
 	return b, err

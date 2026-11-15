@@ -283,6 +283,11 @@ namespace, so namespace RBAC applies to who can see them; cluster-wide ones go
 to the release namespace. Only `minSeverity` (default `warn`) and above are
 stored.
 
+The Helm release name and namespace identify which findings a controller owns.
+Standalone controllers sharing a cluster can set distinct, stable `--instance`
+values. On upgrade, the controller creates new findings under that identity.
+Findings from older versions lack the ownership label and need manual cleanup.
+
 Notifications are sent on *firing* and *resolved*:
 
 ```bash
@@ -323,6 +328,9 @@ x86_64 (arm64 needs an arm64 `vmlinux.h`, see Development). Drop reasons need
 5.17+. Run `kubectl capybara nodes` to see which collectors are active per node.
 
 ## Using it
+
+The `incident` timeline requires live agents. Saved bundles contain aggregate
+windows and can be replayed with commands such as `doctor`.
 
 ```bash
 kubectl capybara                                # dashboard (see below)

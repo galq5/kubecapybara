@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"hash/fnv"
 	"log/slog"
@@ -26,6 +27,7 @@ import (
 var GVR = schema.GroupVersionResource{Group: "capybara.dev", Version: "v1alpha1", Resource: "capyfindings"}
 
 const (
+	labelInstance = "capybara.dev/instance"
 	labelManaged  = "capybara.dev/managed"
 	labelRule     = "capybara.dev/rule"
 	labelSeverity = "capybara.dev/severity"
@@ -37,6 +39,7 @@ const (
 // Config configures the controller.
 type Config struct {
 	Namespace    string // namespace for findings not tied to a pod
+	Instance     string // stable controller installation identity
 	Cluster      string // name used in notifications
 	Interval     time.Duration
 	Window       time.Duration
@@ -56,6 +59,7 @@ type Controller struct {
 	notifier Notifier
 	log      *slog.Logger
 	now      func() time.Time
+	instance string
 }
 
 // New creates a controller.
@@ -69,7 +73,11 @@ func New(cfg Config, src client.Source, dyn dynamic.Interface, n Notifier, log *
 	if n == nil {
 		n = Multi{}
 	}
-	return &Controller{cfg: cfg, src: src, dyn: dyn, notifier: n, log: log, now: time.Now}
+	if cfg.Instance == "" {
+		cfg.Instance = cfg.Namespace
+	}
+	id := sha256.Sum256([]byte(cfg.Instance))
+	return &Controller{instance: fmt.Sprintf("%x", id[:16]), cfg: cfg, src: src, dyn: dyn, notifier: n, log: log, now: time.Now}
 }
 
 // Run reconciles every Interval until ctx is cancelled.
@@ -135,7 +143,7 @@ func (c *Controller) identity(f analysis.Finding, v *analysis.View) (ns, name, s
 		}
 	}
 	h := fnv.New32a()
-	h.Write([]byte(f.Rule + "|" + subject))
+	h.Write([]byte(c.instance + "|" + f.Rule + "|" + subject))
 	if f.Identity != "" {
 		h.Write([]byte("|" + f.Identity))
 	}
@@ -191,7 +199,7 @@ func (c *Controller) reconcile(ctx context.Context, findings []analysis.Finding,
 			obj := &unstructured.Unstructured{Object: map[string]any{
 				"apiVersion": "capybara.dev/v1alpha1", "kind": "CapyFinding",
 				"metadata": map[string]any{"name": name, "namespace": ns, "labels": map[string]any{
-					labelManaged: "true", labelRule: name[:strings.LastIndexByte(name, '-')], labelSeverity: strings.ToLower(f.Severity.String())}},
+					labelManaged: "true", labelInstance: c.instance, labelRule: name[:strings.LastIndexByte(name, '-')], labelSeverity: strings.ToLower(f.Severity.String())}},
 				"spec":   c.spec(f, subject),
 				"status": map[string]any{"state": stateActive, "firstSeen": ts, "lastSeen": ts, "occurrences": int64(1)},
 			}}
@@ -203,6 +211,10 @@ func (c *Controller) reconcile(ctx context.Context, findings []analysis.Finding,
 		case err != nil:
 			c.log.Warn("get finding", "name", name, "err", err)
 		default:
+			if cur.GetLabels()[labelInstance] != c.instance {
+				c.log.Warn("finding name is already in use", "namespace", ns, "name", name)
+				continue
+			}
 			reopened, _, _ := unstructured.NestedString(cur.Object, "status", "state")
 			occ, _, _ := unstructured.NestedInt64(cur.Object, "status", "occurrences")
 			_ = unstructured.SetNestedField(cur.Object, c.spec(f, subject), "spec")
@@ -230,12 +242,15 @@ func (c *Controller) reconcile(ctx context.Context, findings []analysis.Finding,
 	if !complete {
 		return nil
 	}
-	list, err := c.dyn.Resource(GVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: labelManaged + "=true"})
+	list, err := c.dyn.Resource(GVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: labelManaged + "=true," + labelInstance + "=" + c.instance})
 	if err != nil {
 		return err
 	}
 	for i := range list.Items {
 		obj := &list.Items[i]
+		if obj.GetLabels()[labelInstance] != c.instance {
+			continue
+		}
 		key := obj.GetNamespace() + "/" + obj.GetName()
 		if seen[key] {
 			continue

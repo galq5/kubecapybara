@@ -71,11 +71,20 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 		return "", fmt.Errorf("no pods found for workload %q in namespace %s", workload, ns)
 	}
 	sel := stableLabels(v.Meta, pods[0])
+	if len(sel) == 0 {
+		return "", fmt.Errorf("no labels identify workload %q in namespace %s", workload, ns)
+	}
+	for _, p := range v.Meta.Pods {
+		if p.Namespace == ns && k8smeta.Matches(sel, p.Labels) != ids["pod:"+p.UID] {
+			return "", fmt.Errorf("selector does not uniquely identify workload %q in namespace %s", workload, ns)
+		}
+	}
 	name := strings.ToLower(strings.ReplaceAll(pods[0].Workload, "/", "-")) + "-observed"
 
 	ingress := map[peerKey]networkingv1.NetworkPolicyPeer{}
 	egress := map[peerKey]networkingv1.NetworkPolicyPeer{}
 	var notes []string
+	var unsafePeer string
 	dns := false
 
 	peerFor := func(ep Endpoint, port uint16) (networkingv1.NetworkPolicyPeer, intstr.IntOrString, bool) {
@@ -85,9 +94,20 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 			if p == nil {
 				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
 			}
+			selector := stableLabels(v.Meta, p)
+			if len(selector) == 0 {
+				unsafePeer = p.Namespace + "/" + p.Name
+				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
+			}
+			for _, other := range v.Meta.Pods {
+				if other.Namespace == p.Namespace && other.Workload != p.Workload && k8smeta.Matches(selector, other.Labels) {
+					unsafePeer = p.Namespace + "/" + p.Name
+					return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
+				}
+			}
 			return networkingv1.NetworkPolicyPeer{
 				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": p.Namespace}},
-				PodSelector:       &metav1.LabelSelector{MatchLabels: stableLabels(v.Meta, p)},
+				PodSelector:       &metav1.LabelSelector{MatchLabels: selector},
 			}, intstr.FromInt32(int32(port)), true
 		case KindService:
 			s := v.Meta.Service(ep.Namespace, ep.Name)
@@ -146,6 +166,9 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 				egress[keyOf(peer, port)] = peer
 			}
 		}
+	}
+	if unsafePeer != "" {
+		return "", fmt.Errorf("no unique workload selector for observed peer %s", unsafePeer)
 	}
 	for id := range ids {
 		if e := v.Entities[id]; e != nil && e.Stats.DNS != nil && e.Stats.DNS.Queries > 0 {

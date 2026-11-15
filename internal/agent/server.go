@@ -80,6 +80,7 @@ func (a *Agent) Handler() http.Handler {
 		writeJSON(w, c)
 	}))
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(15 * time.Second))
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		a.metrics.write(w)
 	})

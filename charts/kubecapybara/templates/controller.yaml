@@ -190,6 +190,7 @@ spec:
             - --resolve-after={{ $c.resolveAfter }}
             - --keep-resolved={{ $c.keepResolved }}
             - --namespace={{ default .Release.Namespace $c.findingsNamespace }}
+            - --instance={{ .Release.Namespace }}/{{ .Release.Name }}
             - --agent-namespace={{ .Release.Namespace }}
             - --agent-selector=app.kubernetes.io/name=capybara-agent,app.kubernetes.io/instance={{ .Release.Name }}
             - --agent-port={{ .Values.agent.port }}

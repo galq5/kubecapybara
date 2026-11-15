@@ -56,6 +56,7 @@ type Collector interface {
 
 // Agent is the node agent.
 type Agent struct {
+	saveMu   sync.Mutex
 	cfg      Config
 	log      *slog.Logger
 	resolver *cgroups.Resolver
@@ -201,7 +202,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 	defer a.Close()
+	var save sync.WaitGroup
+	saving := make(chan struct{}, 1)
 	defer func() {
+		save.Wait()
 		if err := a.SaveState(); err != nil {
 			a.log.Warn("could not save state", "err", err)
 		}
@@ -235,9 +239,13 @@ func (a *Agent) Run(ctx context.Context) error {
 		case now := <-t.C:
 			a.Tick(last, now)
 			last = now
-			if now.Sub(lastSave) >= time.Minute {
+			if a.cfg.StateDir != "" && now.Sub(lastSave) >= time.Minute && len(saving) == 0 {
 				lastSave = now
+				saving <- struct{}{}
+				save.Add(1)
 				go func() {
+					defer save.Done()
+					defer func() { <-saving }()
 					if err := a.SaveState(); err != nil {
 						a.log.Warn("could not save state", "err", err)
 					}

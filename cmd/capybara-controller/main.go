@@ -38,6 +38,7 @@ func main() {
 		agentPort     = flag.Int("agent-port", 9876, "agent API port")
 		tokenSecret   = flag.String("agent-token-secret", "capybara-agent-token", "Secret holding the agent API token")
 		clusterDomain = flag.String("cluster-domain", "cluster.local", "cluster DNS domain")
+		instance      = flag.String("instance", "", "stable identity of this controller installation (defaults to the findings namespace)")
 		cluster       = flag.String("cluster-name", os.Getenv("CAPYBARA_CLUSTER_NAME"), "cluster name shown in notifications")
 		sloFile       = flag.String("slo-file", os.Getenv("CAPYBARA_SLO_FILE"), "YAML file with SLO definitions")
 		doctorFile    = flag.String("doctor-config", os.Getenv("CAPYBARA_DOCTOR_CONFIG"), "YAML file muting doctor rules and overriding their thresholds")
@@ -57,7 +58,7 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(log, *kubeconfig, controller.Config{
-		Namespace: *namespace, Cluster: *cluster, Interval: *interval, Window: *window, Baseline: *baseline,
+		Instance: *instance, Namespace: *namespace, Cluster: *cluster, Interval: *interval, Window: *window, Baseline: *baseline,
 		ResolveAfter: *resolveAfter, KeepResolved: *keepResolved,
 		Options: analysis.Options{ClusterDomain: *clusterDomain, CostPerGB: *costPerGB},
 	}, *minSev, *sloFile, *doctorFile, *agentNS, *agentSelector, *agentPort, *tokenSecret, *hubURL, *top, *once); err != nil {

@@ -71,3 +71,30 @@ func TestPartialFailurePreservesFindings(t *testing.T) {
 		t.Fatalf("complete healthy data did not resolve alert: %s", state)
 	}
 }
+
+func TestControllerFindingOwnership(t *testing.T) {
+	first, dyn, _, now := newTest(t)
+	cfg := first.cfg
+	cfg.Instance = "another-installation"
+	second := New(cfg, nil, dyn, nil, first.log)
+	second.now = first.now
+	ctx := context.Background()
+	f := analysis.Finding{Rule: "test", Severity: analysis.SevCrit}
+	if err := first.Reconcile(ctx, []analysis.Finding{f}, testView()); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(11 * time.Minute)
+	if err := second.Reconcile(ctx, nil, testView()); err != nil {
+		t.Fatal(err)
+	}
+	state, _, _ := unstructured.NestedString(list(t, first)[0].Object, "status", "state")
+	if state != stateActive {
+		t.Fatalf("second controller changed first controller's finding to %s", state)
+	}
+	if err := second.Reconcile(ctx, []analysis.Finding{f}, testView()); err != nil {
+		t.Fatal(err)
+	}
+	if count := len(list(t, first)); count != 2 {
+		t.Fatalf("expected an independent finding for each controller, got %d", count)
+	}
+}

@@ -764,6 +764,9 @@ func (o *options) cmdIncident() *cobra.Command {
 		Use:   "incident",
 		Short: "Timeline of what changed and what broke: rollouts, scaling, evictions, crashes, metric jumps with likely causes",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if _, ok := o.src.(*client.FileSource); ok {
+				return fmt.Errorf("incident requires live time buckets, which snapshot bundles do not contain")
+			}
 			ctx := cmd.Context()
 			if steps < 3 {
 				steps = 3
