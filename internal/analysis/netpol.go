@@ -51,7 +51,7 @@ func stableLabels(m *k8smeta.Meta, p *k8smeta.Pod) map[string]string {
 
 type peerKey struct {
 	peer string
-	port int32
+	port intstr.IntOrString
 	prot string
 }
 
@@ -78,27 +78,29 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 	var notes []string
 	dns := false
 
-	peerFor := func(ep Endpoint, port uint16) (networkingv1.NetworkPolicyPeer, int32, bool) {
+	peerFor := func(ep Endpoint, port uint16) (networkingv1.NetworkPolicyPeer, intstr.IntOrString, bool) {
 		switch ep.Kind {
 		case KindPod:
 			p := v.Meta.Pods[strings.TrimPrefix(ep.ID, "pod:")]
 			if p == nil {
-				return networkingv1.NetworkPolicyPeer{}, 0, false
+				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
 			}
 			return networkingv1.NetworkPolicyPeer{
 				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": p.Namespace}},
 				PodSelector:       &metav1.LabelSelector{MatchLabels: stableLabels(v.Meta, p)},
-			}, int32(port), true
+			}, intstr.FromInt32(int32(port)), true
 		case KindService:
 			s := v.Meta.Service(ep.Namespace, ep.Name)
 			if s == nil || len(s.Selector) == 0 {
-				return networkingv1.NetworkPolicyPeer{}, 0, false
+				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
 			}
-			target := int32(port)
+			target := intstr.FromInt32(int32(port))
 			for _, sp := range s.Ports {
 				if sp.Port == int32(port) {
 					if n, err := strconv.Atoi(sp.TargetPort); err == nil {
-						target = int32(n)
+						target = intstr.FromInt32(int32(n))
+					} else if sp.TargetPort != "" {
+						target = intstr.FromString(sp.TargetPort)
 					}
 				}
 			}
@@ -109,7 +111,7 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 		case KindExternal, KindNode, KindUnknown:
 			a, err := netip.ParseAddr(ep.IP)
 			if err != nil {
-				return networkingv1.NetworkPolicyPeer{}, 0, false
+				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
 			}
 			bits := 32
 			if a.Is6() {
@@ -118,17 +120,17 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 			if ep.DNSName != "" {
 				notes = append(notes, fmt.Sprintf("%s = %s (IPs behind DNS names change; consider an egress gateway or FQDN policies)", ep.IP, ep.DNSName))
 			}
-			return networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: fmt.Sprintf("%s/%d", ep.IP, bits)}}, int32(port), true
+			return networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: fmt.Sprintf("%s/%d", ep.IP, bits)}}, intstr.FromInt32(int32(port)), true
 		}
-		return networkingv1.NetworkPolicyPeer{}, 0, false
+		return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
 	}
-	keyOf := func(p networkingv1.NetworkPolicyPeer, port int32) peerKey {
+	keyOf := func(p networkingv1.NetworkPolicyPeer, port intstr.IntOrString) peerKey {
 		b, _ := yaml.Marshal(p)
 		return peerKey{string(b), port, "TCP"}
 	}
 
 	for _, e := range v.Edges {
-		if ids[e.Server.ID] && !ids[e.Client.ID] {
+		if ids[e.Server.ID] {
 			if e.Client.Kind == KindHost || e.Client.Kind == KindLocal {
 				continue // kubelet probes / node-local traffic are always allowed
 			}
@@ -136,7 +138,7 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 				ingress[keyOf(peer, port)] = peer
 			}
 		}
-		if ids[e.Client.ID] && !ids[e.Server.ID] {
+		if ids[e.Client.ID] {
 			if e.Server.Kind == KindLocal {
 				continue
 			}
@@ -207,7 +209,7 @@ func sortedKeys(m map[peerKey]networkingv1.NetworkPolicyPeer) []peerKey {
 		if keys[i].peer != keys[j].peer {
 			return keys[i].peer < keys[j].peer
 		}
-		return keys[i].port < keys[j].port
+		return keys[i].port.String() < keys[j].port.String()
 	})
 	return keys
 }
@@ -223,7 +225,7 @@ func rulesIngress(m map[peerKey]networkingv1.NetworkPolicyPeer) []networkingv1.N
 			order = append(order, k.peer)
 		}
 		tcp := corev1.ProtocolTCP
-		port := intstr.FromInt32(k.port)
+		port := k.port
 		r.Ports = append(r.Ports, networkingv1.NetworkPolicyPort{Protocol: &tcp, Port: &port})
 	}
 	var out []networkingv1.NetworkPolicyIngressRule
@@ -244,7 +246,7 @@ func rulesEgress(m map[peerKey]networkingv1.NetworkPolicyPeer) []networkingv1.Ne
 			order = append(order, k.peer)
 		}
 		tcp := corev1.ProtocolTCP
-		port := intstr.FromInt32(k.port)
+		port := k.port
 		r.Ports = append(r.Ports, networkingv1.NetworkPolicyPort{Protocol: &tcp, Port: &port})
 	}
 	var out []networkingv1.NetworkPolicyEgressRule

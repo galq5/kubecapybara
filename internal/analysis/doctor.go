@@ -41,6 +41,8 @@ type Finding struct {
 	// runs, e.g. "dns-ndots"); used to track findings over time and to
 	// mute it.
 	Rule string `json:"rule"`
+	// Identity distinguishes independent findings of the same rule (for example SLOs).
+	Identity string `json:"identity,omitempty"`
 
 	// hint as the rule wrote it, with <pod>, <deployment> and <workload>
 	// placeholders (Hint has them filled in for the first subject)
@@ -237,6 +239,9 @@ func ruleRestarts(v *View) []Finding {
 	var lines []string
 	var subjects []string
 	for _, p := range v.Meta.Pods {
+		if v.Opts.Namespace != "" && p.Namespace != v.Opts.Namespace {
+			continue
+		}
 		for _, c := range p.Containers {
 			if c.StateReason == "CrashLoopBackOff" || (c.Restarts >= 3 && !c.LastFinished.IsZero() && c.LastFinished.After(v.From.Add(-30*time.Minute))) {
 				lines = append(lines, fmt.Sprintf("%s/%s container %s: %d restarts, last %s (exit %d) %s",

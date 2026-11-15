@@ -89,11 +89,11 @@ func TestApplyTop(t *testing.T) {
 	flows := map[flowKey]int{}
 	for _, s := range out {
 		for _, p := range s.Pairs {
-			flows[flowKey{p.Client, p.Server, p.Port}]++
+			flows[flowKey{client: p.Client, server: p.Server, port: p.Port}]++
 		}
 	}
 	// busiest flow (both sides) + the failing one; the quiet healthy one goes
-	if len(flows) != 2 || flows[flowKey{"10.0.2.1", "10.0.1.2", 5432}] != 2 || flows[flowKey{"10.0.2.1", "10.0.1.1", 5432}] != 1 {
+	if len(flows) != 2 || flows[flowKey{client: "10.0.2.1", server: "10.0.1.2", port: 5432}] != 2 || flows[flowKey{client: "10.0.2.1", server: "10.0.1.1", port: 5432}] != 1 {
 		t.Fatalf("flows %v", flows)
 	}
 	_, e := count(out)

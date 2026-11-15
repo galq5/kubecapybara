@@ -17,6 +17,7 @@ const (
 	startupWindow   = 3 * time.Minute
 	maxStartupEvs   = 200
 	seriesLen       = 120
+	seriesIdle      = 15 * time.Minute
 	crashLookback   = 2 * time.Minute
 	maxDNSNames     = 20000
 	dnsNameLifetime = 2 * time.Hour
@@ -344,4 +345,21 @@ func (r *Recorder) Names() map[string]string {
 		out[ip] = n.name
 	}
 	return out
+}
+
+// Prune removes samples of inactive entities after their recent history expires.
+// Frozen crash reports own copies of samples and are unaffected.
+func (r *Recorder) Prune(now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, samples := range r.series {
+		if len(samples) == 0 || now.Sub(samples[len(samples)-1].Time) > seriesIdle {
+			delete(r.series, id)
+		}
+	}
+	for id, at := range r.lastCrash {
+		if now.Sub(at) > seriesIdle {
+			delete(r.lastCrash, id)
+		}
+	}
 }

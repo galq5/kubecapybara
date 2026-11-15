@@ -347,7 +347,7 @@ func SLOFindings(st []SLOStatus) []Finding {
 		default:
 			continue
 		}
-		f := Finding{Severity: sev, Category: "slo", Rule: "slo-burn", Score: s.Burn(),
+		f := Finding{Severity: sev, Category: "slo", Rule: "slo-burn", Identity: s.Name + "|" + s.Workload + "|" + s.Service, Score: s.Burn(),
 			Title: fmt.Sprintf("SLO %s is burning its error budget %.1fx too fast", s.Name, s.Burn())}
 		if s.Availability > 0 {
 			f.Detail = append(f.Detail, fmt.Sprintf("availability %.2f%% (objective %.2f%%): burn %.1fx now, %.1fx over the baseline",

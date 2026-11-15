@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"net/netip"
 	"sort"
 	"strings"
 
@@ -58,6 +59,27 @@ func (r resolver) keepPair(p *model.Pair) bool {
 type flowKey struct {
 	client, server string
 	port           uint16
+	scope          string
+}
+
+// Local addresses are shared by independent pod network namespaces.
+func (r resolver) flowKey(p *model.Pair, node string) flowKey {
+	k := flowKey{client: p.Client, server: p.Server, port: p.Port}
+	a, _ := netip.ParseAddr(p.Client)
+	b, _ := netip.ParseAddr(p.Server)
+	if a.IsLoopback() || b.IsLoopback() {
+		k.scope = node
+		if uid, ok := strings.CutPrefix(p.Owner, "pod:"); ok {
+			var pod *k8smeta.Pod
+			if r.meta != nil {
+				pod = r.meta.Pods[uid]
+			}
+			if pod == nil || !pod.HostNetwork {
+				k.scope += "|" + p.Owner
+			}
+		}
+	}
+	return k
 }
 
 func pairErrors(p *model.Pair) uint64 {
@@ -134,7 +156,7 @@ func Apply(snaps []*model.Snapshot, meta *k8smeta.Meta, sc Scope) []*model.Snaps
 			if !r.keepPair(p) {
 				continue
 			}
-			k := flowKey{p.Client, p.Server, p.Port}
+			k := r.flowKey(p, s.Node)
 			v := flows[k]
 			v[0] += p.BytesTx + p.BytesRx + p.Connects
 			v[1] += pairErrors(p)
@@ -172,7 +194,7 @@ func Apply(snaps []*model.Snapshot, meta *k8smeta.Meta, sc Scope) []*model.Snaps
 		}
 		ips := map[string]bool{}
 		for _, p := range s.Pairs {
-			if keepFlow(flowKey{p.Client, p.Server, p.Port}) {
+			if keepFlow(r.flowKey(p, s.Node)) {
 				c.Pairs = append(c.Pairs, p)
 				ips[p.Client], ips[p.Server] = true, true
 			}

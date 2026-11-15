@@ -142,6 +142,7 @@ type NodeView struct {
 
 // Options tune the analysis.
 type Options struct {
+	Namespace     string // restrict metadata-only doctor rules to this namespace
 	ClusterDomain string
 	CostPerGB     float64 // inter-zone transfer price per GB, per direction
 	// Doctor mutes rules and overrides thresholds.
@@ -337,6 +338,7 @@ type flowKey struct {
 	client, server string
 	port           uint16
 	scope          string // node name for loopback flows
+	podScope       string // pod network namespace, empty for host networking
 }
 
 type flow struct {
@@ -358,6 +360,11 @@ func (v *View) buildEdges(listeners map[string]string) {
 			k := flowKey{client: p.Client, server: p.Server, port: p.Port}
 			if isLoopback(p.Client) || isLoopback(p.Server) {
 				k.scope = s.Node
+				if uid, ok := strings.CutPrefix(p.Owner, "pod:"); ok {
+					if pod := v.Meta.Pods[uid]; pod == nil || !pod.HostNetwork {
+						k.podScope = p.Owner
+					}
+				}
 			}
 			f, ok := flows[k]
 			if !ok {
@@ -412,11 +419,15 @@ func (v *View) buildEdges(listeners map[string]string) {
 		var client, server Endpoint
 		if f.clientOwner != "" {
 			client = v.ownerEndpoint(f.clientOwner, k.client)
+		} else if k.podScope != "" {
+			client = v.EntityEndpoint(k.podScope, node)
 		} else {
 			client = v.IPEndpoint(k.client, node)
 		}
 		if f.serverOwner != "" {
 			server = v.ownerEndpoint(f.serverOwner, k.server)
+		} else if k.podScope != "" {
+			server = v.EntityEndpoint(k.podScope, node)
 		} else {
 			server = v.IPEndpoint(k.server, node)
 			if server.Kind == KindLocal || server.Kind == KindNode {

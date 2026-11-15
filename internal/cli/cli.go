@@ -20,6 +20,7 @@ import (
 
 	"github.com/galq5/kubecapybara/internal/analysis"
 	"github.com/galq5/kubecapybara/internal/client"
+	"github.com/galq5/kubecapybara/internal/hub"
 	"github.com/galq5/kubecapybara/internal/k8smeta"
 	"github.com/galq5/kubecapybara/internal/model"
 	"github.com/galq5/kubecapybara/internal/render"
@@ -291,7 +292,7 @@ func (o *options) init() error {
 }
 
 func (o *options) aopts() analysis.Options {
-	return analysis.Options{ClusterDomain: o.clusterDomain, CostPerGB: o.costPerGB, Doctor: o.doctor}
+	return analysis.Options{Namespace: o.namespace, ClusterDomain: o.clusterDomain, CostPerGB: o.costPerGB, Doctor: o.doctor}
 }
 
 func (o *options) timeRange() (time.Time, time.Time) {
@@ -321,6 +322,7 @@ func (o *options) load(ctx context.Context, withBase bool) (*tui.Result, error) 
 	if err != nil {
 		res.Warnings = append(res.Warnings, "kubernetes metadata unavailable: "+err.Error())
 	}
+	snaps = hub.Apply(snaps, meta, hub.Scope{Namespace: o.namespace})
 	res.View = analysis.Build(snaps, meta, o.aopts())
 	if withBase && o.baseline > 0 {
 		res.Base = o.baselineView(ctx, from, meta)
@@ -354,6 +356,7 @@ func (o *options) baselineView(ctx context.Context, from time.Time, meta *k8smet
 	if len(bs) == 0 || !hasData(bs) {
 		return nil
 	}
+	bs = hub.Apply(bs, meta, hub.Scope{Namespace: o.namespace})
 	b := analysis.Build(bs, meta, o.aopts())
 	if b.From.Before(bf) {
 		b.From = bf

@@ -260,6 +260,7 @@ func (a *Agent) Tick(start, end time.Time) {
 			c.Collect(w)
 		}()
 	}
+	a.rec.Prune(end)
 	a.store.Add(w)
 	a.metrics.observe(w)
 }

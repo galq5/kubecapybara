@@ -10,6 +10,9 @@ import (
 
 // MatchProblem reports whether a problem passes the text filter.
 func MatchProblem(p *analysis.Problem, f Filter) bool {
+	if f.Namespace != "" && p.Kind == "workload" && !strings.HasPrefix(p.Key, f.Namespace+"/") {
+		return false
+	}
 	if f.match(p.Title) {
 		return true
 	}

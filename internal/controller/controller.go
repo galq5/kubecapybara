@@ -116,7 +116,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 			}
 		}
 	}
-	return c.Reconcile(ctx, analysis.DoctorWith(v, base, c.cfg.SLOs), v)
+	return c.reconcile(ctx, analysis.DoctorWith(v, base, c.cfg.SLOs), v, len(errs) == 0)
 }
 
 var nonName = regexp.MustCompile(`[^a-z0-9-]+`)
@@ -136,6 +136,9 @@ func (c *Controller) identity(f analysis.Finding, v *analysis.View) (ns, name, s
 	}
 	h := fnv.New32a()
 	h.Write([]byte(f.Rule + "|" + subject))
+	if f.Identity != "" {
+		h.Write([]byte("|" + f.Identity))
+	}
 	rule := strings.Trim(nonName.ReplaceAllString(strings.ToLower(f.Rule), "-"), "-")
 	if len(rule) > 40 {
 		rule = strings.TrimRight(rule[:40], "-")
@@ -164,6 +167,11 @@ func (c *Controller) spec(f analysis.Finding, subject string) map[string]any {
 // Reconcile creates/updates objects for current findings and resolves or
 // deletes the ones that went away.
 func (c *Controller) Reconcile(ctx context.Context, findings []analysis.Finding, v *analysis.View) error {
+	return c.reconcile(ctx, findings, v, true)
+}
+
+// Incomplete telemetry may create findings, but cannot establish recovery.
+func (c *Controller) reconcile(ctx context.Context, findings []analysis.Finding, v *analysis.View, complete bool) error {
 	now := c.now().UTC()
 	ts := now.Format(time.RFC3339)
 	seen := map[string]bool{}
@@ -219,6 +227,9 @@ func (c *Controller) Reconcile(ctx context.Context, findings []analysis.Finding,
 		}
 	}
 
+	if !complete {
+		return nil
+	}
 	list, err := c.dyn.Resource(GVR).Namespace(metav1.NamespaceAll).List(ctx, metav1.ListOptions{LabelSelector: labelManaged + "=true"})
 	if err != nil {
 		return err
