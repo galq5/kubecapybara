@@ -41,8 +41,10 @@ func TestVoIPRows(t *testing.T) {
 		t.Fatalf("top codes %q", got)
 	}
 	f := byRule(ruleVoIP(voipView(sip, nil, 0)))
-	if _, ok := f["sip-failures"]; !ok {
+	if sf, ok := f["sip-failures"]; !ok {
 		t.Error("missing sip-failures")
+	} else if d := sf.Detail[0]; contains(d, "200×") || !contains(d, "503×5") {
+		t.Errorf("failure detail should list failure codes only: %s", d)
 	}
 	if _, ok := f["sip-slow-setup"]; !ok {
 		t.Error("missing sip-slow-setup")

@@ -96,14 +96,21 @@ func appPod(node, ns string) *corev1.Pod {
 
 func startHub(t *testing.T) (*hub.Hub, *httptest.Server, []*fakeAgent) {
 	t.Helper()
+	return startHubWith(t, func(*hub.Config) {})
+}
+
+func startHubWith(t *testing.T, edit func(*hub.Config)) (*hub.Hub, *httptest.Server, []*fakeAgent) {
+	t.Helper()
 	port, agents := startAgents(t, "n1", "n2")
 	objs := []runtime.Object{
 		agentPod(0, "n1"), agentPod(1, "n2"), appPod("n1", "shop"), appPod("n2", "data"),
 		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}}, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n2"}},
 	}
 	cs := fake.NewSimpleClientset(objs...)
-	h, err := hub.New(hub.Config{AgentNamespace: "capybara", AgentSelector: "app.kubernetes.io/name=capybara-agent",
-		AgentPort: port, Token: token, CacheTTL: time.Minute}, cs, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cfg := hub.Config{AgentNamespace: "capybara", AgentSelector: "app.kubernetes.io/name=capybara-agent",
+		AgentPort: port, Token: token, CacheTTL: time.Minute}
+	edit(&cfg)
+	h, err := hub.New(cfg, cs, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,6 +171,39 @@ func TestHubEndToEnd(t *testing.T) {
 	}
 	if _, err := src.Profile(ctx, "nope", "pod:x", 1, 99); err == nil {
 		t.Fatal("profile on unknown node should fail")
+	}
+}
+
+// TestHubDefaultTop: the hub's --default-top applies to clients that do not
+// set --top; an explicit 0 (and the controller) gets everything, and a
+// client scoped by the default does not cache the pruned metadata.
+func TestHubDefaultTop(t *testing.T) {
+	_, srv, _ := startHubWith(t, func(c *hub.Config) { c.DefaultTop = 1 })
+	ctx := context.Background()
+	to := time.Now()
+	count := func(src *client.HubSource) int {
+		snaps, errs := src.Snapshots(ctx, to.Add(-time.Minute), to, false)
+		if len(errs) > 0 {
+			t.Fatal(errs)
+		}
+		n := 0
+		for _, s := range snaps {
+			n += len(s.Entities)
+		}
+		return n
+	}
+	def := &client.HubSource{URL: srv.URL, Token: token}
+	if n := count(def); n != 1 {
+		t.Fatalf("default top: %d entities, want 1", n)
+	}
+	m1, _ := def.Meta(ctx)
+	count(def)
+	if m2, _ := def.Meta(ctx); m1 == m2 {
+		t.Fatal("pruned metadata of a hub-scoped response was cached instead of refreshed")
+	}
+	all := &client.HubSource{URL: srv.URL, Token: token, TopSet: true}
+	if n := count(all); n != 2 {
+		t.Fatalf("explicit --top 0: %d entities, want 2", n)
 	}
 }
 

@@ -112,6 +112,15 @@ func (p *Pair) Add(o *Pair) {
 	}
 }
 
+// AddConcurrent merges a different connection set observed over the same
+// time (another flow or owner): like Add, but open/idle connections, gauges
+// that Add max-merges over time, are summed.
+func (p *Pair) AddConcurrent(o *Pair) {
+	open, idle := p.OpenConns+o.OpenConns, p.IdleConns+o.IdleConns
+	p.Add(o)
+	p.OpenConns, p.IdleConns = open, idle
+}
+
 // Clone returns a deep copy.
 func (p *Pair) Clone() *Pair {
 	c := *p

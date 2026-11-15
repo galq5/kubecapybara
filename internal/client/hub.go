@@ -41,14 +41,20 @@ type HubSource struct {
 	Token       string
 	TokenSecret string // read with CS when Token is empty
 
-	// ScopeNamespace and Top are applied by the hub (see hub.Scope).
+	// ScopeNamespace and Top are applied by the hub (see hub.Scope). Top 0
+	// leaves the hub's --default-top in effect unless TopSet is true (then
+	// 0 asks for everything).
 	ScopeNamespace string
 	Top            int
+	TopSet         bool
 
 	tokenOnce sync.Once
 	metaMu    sync.Mutex
 	meta      *k8smeta.Meta
 	metaAt    time.Time
+	// hubScoped: the hub scoped a response we did not ask to scope (its
+	// default top): its metadata is pruned and must be fetched every time
+	hubScoped bool
 }
 
 // DiscoverHub returns the hub Service of a namespace and its port, or ""
@@ -162,6 +168,7 @@ type hubSnapshots struct {
 	Snapshots []*model.Snapshot `json:"snapshots"`
 	Errors    []string          `json:"errors"`
 	Meta      *k8smeta.Meta     `json:"meta"`
+	Scoped    bool              `json:"scoped"`
 }
 
 const hubMetaTTL = 30 * time.Second
@@ -170,8 +177,8 @@ func (h *HubSource) scopeParams(q url.Values) {
 	if h.ScopeNamespace != "" {
 		q.Set("namespace", h.ScopeNamespace)
 	}
-	if h.Top > 0 {
-		q.Set("top", strconv.Itoa(h.Top))
+	if h.Top > 0 || h.TopSet {
+		q.Set("top", strconv.Itoa(max(h.Top, 0)))
 	}
 }
 
@@ -185,7 +192,7 @@ func (h *HubSource) Snapshots(ctx context.Context, from, to time.Time, lite bool
 	// scoped data needs, or the full set at most every hubMetaTTL.
 	scoped := h.ScopeNamespace != "" || h.Top > 0
 	h.metaMu.Lock()
-	wantMeta := !lite && (scoped || h.meta == nil || time.Since(h.metaAt) > hubMetaTTL)
+	wantMeta := !lite && (scoped || h.hubScoped || h.meta == nil || time.Since(h.metaAt) > hubMetaTTL)
 	h.metaMu.Unlock()
 	if wantMeta {
 		q.Set("meta", "1")
@@ -202,12 +209,15 @@ func (h *HubSource) Snapshots(ctx context.Context, from, to time.Time, lite bool
 	for _, e := range resp.Errors {
 		errs = append(errs, errors.New(e))
 	}
+	h.metaMu.Lock()
+	if resp.Scoped && !scoped && !lite {
+		h.hubScoped = true
+	}
 	if resp.Meta != nil {
 		resp.Meta.Index()
-		h.metaMu.Lock()
 		h.meta, h.metaAt = resp.Meta, time.Now()
-		h.metaMu.Unlock()
 	}
+	h.metaMu.Unlock()
 	return resp.Snapshots, errs
 }
 

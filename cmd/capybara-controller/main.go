@@ -140,7 +140,7 @@ func run(log *slog.Logger, kubeconfig string, cfg controller.Config, minSev, slo
 
 	var src client.Source = client.NewKubeSource(cs, agentNS, selector, port, cfg.Options.ClusterDomain, tokenSecret)
 	if hubURL != "" {
-		src = &client.HubSource{URL: hubURL, CS: cs, Namespace: agentNS, TokenSecret: tokenSecret, Top: top}
+		src = &client.HubSource{URL: hubURL, CS: cs, Namespace: agentNS, TokenSecret: tokenSecret, Top: top, TopSet: true}
 	}
 	c := controller.New(cfg, src, dyn, notifiers, log)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

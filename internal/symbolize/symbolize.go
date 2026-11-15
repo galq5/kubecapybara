@@ -140,7 +140,15 @@ func (s *Symbolizer) perfMap(pid uint32) []sym {
 			m = append(m, sym{start, parts[2]}, sym{start + size, ""})
 		}
 		f.Close()
-		sort.SliceStable(m, func(i, j int) bool { return m[i].addr < m[j].addr })
+		// by address; at equal addresses end markers sort first so that they
+		// never hide a symbol starting where another one ends, and symbols
+		// keep file order (a later entry for recompiled code wins)
+		sort.SliceStable(m, func(i, j int) bool {
+			if m[i].addr != m[j].addr {
+				return m[i].addr < m[j].addr
+			}
+			return m[i].name == "" && m[j].name != ""
+		})
 	}
 	s.mu.Lock()
 	s.perfMaps[pid] = m

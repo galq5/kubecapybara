@@ -237,8 +237,12 @@ helm upgrade capybara ... --set hub.enabled=true
 kubectl capybara                  # finds the hub automatically (--hub=off bypasses it)
 kubectl capybara -n shop          # the hub filters to one namespace before sending
 kubectl capybara --top 200        # only the 200 busiest + 200 most failing connections/pods
+kubectl capybara --top 0          # everything, even when the hub sets hub.defaultTop
 kubectl capybara --refresh 15s    # slower dashboard refresh
 ```
+
+Without `--top` the hub's `hub.defaultTop` applies (0, everything, by
+default); the controller always evaluates everything unless given `--top`.
 
 `capybara-hub` (a Deployment, same image):
 

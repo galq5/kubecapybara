@@ -219,8 +219,10 @@ const idleAfter = 30 * time.Second
 func (c *netCollector) scanSockets(w *Window) {
 	a := c.a
 	now := monoNow()
-	type cnt struct{ open, idle uint64 }
-	counts := map[bpf.NetPairKey]*cnt{}
+	// counted per pair as the window keys it: sockets of several cgroups
+	// (containers of one pod) belong to the same pair
+	counts := map[model.PairKey]*model.Pair{}
+	owners := map[uint64]string{}
 	var (
 		k  uint64
 		si bpf.NetSkInfo
@@ -230,31 +232,36 @@ func (c *netCollector) scanSockets(w *Window) {
 		if si.HasKey == 0 || si.EstNs == 0 {
 			continue
 		}
-		x := counts[si.Key]
-		if x == nil {
-			x = &cnt{}
-			counts[si.Key] = x
+		key := si.Key
+		side := "client"
+		if key.Side == 2 {
+			side = "server"
 		}
-		x.open++
+		owner, ok := owners[key.Cgroup]
+		if !ok {
+			owner = "unknown"
+			if key.Cgroup != 0 {
+				owner = a.resolver.Entity(key.Cgroup)
+			}
+			owners[key.Cgroup] = owner
+		}
+		p := &model.Pair{Client: ip16(key.Saddr), Server: ip16(key.Daddr), Port: key.Dport, Side: side, Owner: owner}
+		x := counts[p.Key()]
+		if x == nil {
+			x = p
+			counts[p.Key()] = x
+		}
+		x.OpenConns++
 		last := si.LastRttNs
 		if last == 0 {
 			last = si.EstNs
 		}
 		if now > last && now-last > uint64(idleAfter) {
-			x.idle++
+			x.IdleConns++
 		}
 	}
-	for key, x := range counts {
-		side := "client"
-		if key.Side == 2 {
-			side = "server"
-		}
-		owner := "unknown"
-		if key.Cgroup != 0 {
-			owner = a.resolver.Entity(key.Cgroup)
-		}
-		w.AddPair(&model.Pair{Client: ip16(key.Saddr), Server: ip16(key.Daddr), Port: key.Dport, Side: side, Owner: owner,
-			OpenConns: x.open, IdleConns: x.idle})
+	for _, p := range counts {
+		w.AddPair(p)
 	}
 }
 

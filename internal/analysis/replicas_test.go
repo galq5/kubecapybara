@@ -81,6 +81,21 @@ func TestSLOBurn(t *testing.T) {
 	}
 }
 
+// TestSLOBurnPerSLI: a fast burn needs the same SLI to burn in both
+// windows; availability now and latency in the baseline is not sustained.
+func TestSLOBurnPerSLI(t *testing.T) {
+	mixed := SLOStatus{SLO: SLO{Name: "api", Availability: 99.9, Latency: time.Millisecond, LatencyObjective: 99},
+		Requests: 1000, AvailBurn: 30, LatencyBurn: 1, BaseAvailBurn: 1, BaseLatBurn: 30, HasBase: true}
+	if fs := SLOFindings([]SLOStatus{mixed}); len(fs) != 0 {
+		t.Fatalf("mixed SLIs must not fire: %+v", fs)
+	}
+	sustained := mixed
+	sustained.BaseAvailBurn = 20
+	if fs := SLOFindings([]SLOStatus{sustained}); len(fs) != 1 || fs[0].Severity != SevCrit {
+		t.Fatalf("sustained availability burn: %+v", fs)
+	}
+}
+
 func TestLoadSLOs(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "slos.yaml")
 	os.WriteFile(p, []byte("slos:\n  - name: checkout\n    workload: shop/Deployment/checkout\n    availability: 99.5\n    latency: 300ms\n"), 0o644)

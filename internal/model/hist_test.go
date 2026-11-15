@@ -28,3 +28,17 @@ func TestHistQuantiles(t *testing.T) {
 		t.Fatal("slots")
 	}
 }
+
+// TestPairGauges: open/idle connections are max-merged over time (Add) and
+// summed across distinct concurrent connection sets (AddConcurrent).
+func TestPairGauges(t *testing.T) {
+	p := &Pair{OpenConns: 10, IdleConns: 4, Connects: 1}
+	p.Add(&Pair{OpenConns: 8, IdleConns: 6, Connects: 1})
+	if p.OpenConns != 10 || p.IdleConns != 6 || p.Connects != 2 {
+		t.Fatalf("Add: %+v", p)
+	}
+	p.AddConcurrent(&Pair{OpenConns: 5, IdleConns: 1, Connects: 1})
+	if p.OpenConns != 15 || p.IdleConns != 7 || p.Connects != 3 {
+		t.Fatalf("AddConcurrent: %+v", p)
+	}
+}

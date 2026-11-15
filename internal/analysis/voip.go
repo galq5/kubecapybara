@@ -67,7 +67,7 @@ func VoIP(v *View) []VoIPRow {
 					switch {
 					case userCodes[c]:
 						r.UserBusy += n
-					case c >= "500" || c == "408":
+					case failureCode(c):
 						r.Failed += n
 					}
 				}
@@ -94,15 +94,31 @@ func VoIP(v *View) []VoIPRow {
 	return out
 }
 
+// failureCode reports whether a final INVITE response code is a failure of
+// the system (not the callee: see userCodes).
+func failureCode(c string) bool { return !userCodes[c] && (c >= "500" || c == "408") }
+
 // TopCodes formats the most frequent final codes ("503×4 486×2").
 func (r VoIPRow) TopCodes(n int) string {
+	return r.topCodes(n, func(c string) bool { return c != "180" && c != "183" })
+}
+
+// TopFailureCodes formats the most frequent failure codes.
+func (r VoIPRow) TopFailureCodes(n int) string {
+	if s := r.topCodes(n, failureCode); s != "" {
+		return s
+	}
+	return "timeouts"
+}
+
+func (r VoIPRow) topCodes(n int, keep func(string) bool) string {
 	type kv struct {
 		code  string
 		count uint64
 	}
 	var all []kv
 	for c, k := range r.Codes {
-		if c != "180" && c != "183" {
+		if keep(c) {
 			all = append(all, kv{c, k})
 		}
 	}
@@ -140,7 +156,7 @@ func ruleVoIP(v *View) []Finding {
 		name := r.Endpoint.Display()
 		if r.Attempts >= 5 && float64(r.Failed) >= 0.1*float64(r.Attempts) {
 			fail = append(fail, fmt.Sprintf("%s: %d of %d call attempts failed (%s), answer ratio %s",
-				name, r.Failed, r.Attempts, r.TopCodes(3), Pct(r.ASR)))
+				name, r.Failed, r.Attempts, r.TopFailureCodes(3), Pct(r.ASR)))
 			failSubj = append(failSubj, r.Entity)
 			failScore += float64(r.Failed)
 		}
