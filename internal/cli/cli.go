@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mattn/go-isatty"
@@ -222,42 +223,27 @@ func (o *options) init() error {
 		ds := &client.DirectSource{URLs: o.agents, Token: o.agentToken}
 		if !o.noK8s {
 			if cs, err := o.kubeClient(); err == nil {
-				var (
-					failed bool
-					cached *k8smeta.Meta
-				)
+				km := &kubeMeta{load: func(ctx context.Context) (*k8smeta.Meta, error) {
+					c, cancel := context.WithTimeout(ctx, 5*time.Second)
+					defer cancel()
+					return k8smeta.Load(c, cs, o.clusterDomain)
+				}}
 				ds.ChangesFn = func(ctx context.Context, since time.Time) ([]k8smeta.Change, error) {
-					if failed {
+					m := km.get(ctx)
+					if m == nil {
 						return nil, nil
 					}
-					m, _ := ds.MetaFn(ctx)
 					return k8smeta.LoadChanges(ctx, cs, m, since)
 				}
 				ds.EventsFn = func(ctx context.Context, ns, uid string) ([]k8smeta.PodEvent, error) {
-					if failed {
+					if km.unavailable() {
 						return nil, nil
 					}
 					c, cancel := context.WithTimeout(ctx, 5*time.Second)
 					defer cancel()
 					return k8smeta.LoadPodEvents(c, cs, ns, uid)
 				}
-				ds.MetaFn = func(ctx context.Context) (*k8smeta.Meta, error) {
-					if failed {
-						return nil, nil
-					}
-					if cached != nil && time.Since(cached.Loaded) < 30*time.Second {
-						return cached, nil
-					}
-					c, cancel := context.WithTimeout(ctx, 5*time.Second)
-					defer cancel()
-					m, err := k8smeta.Load(c, cs, o.clusterDomain)
-					if err != nil {
-						failed = true
-						return nil, nil
-					}
-					cached = m
-					return m, nil
-				}
+				ds.MetaFn = func(ctx context.Context) (*k8smeta.Meta, error) { return km.get(ctx), nil }
 			}
 		}
 		o.src = ds
@@ -289,6 +275,44 @@ func (o *options) init() error {
 		o.src = client.NewKubeSource(cs, o.agentNS, o.agentSelector, o.agentPort, o.clusterDomain, o.agentTokenSecret)
 	}
 	return nil
+}
+
+// kubeMeta caches cluster metadata for --agent, where the Kubernetes API is
+// optional. If the first load fails there is no usable cluster and it is
+// not tried again (each attempt would stall a dashboard refresh); a later
+// failure keeps the last good copy and is retried after metaTTL.
+type kubeMeta struct {
+	load func(ctx context.Context) (*k8smeta.Meta, error)
+
+	mu       sync.Mutex
+	cached   *k8smeta.Meta
+	loadedAt time.Time
+	failed   bool
+}
+
+const metaTTL = 30 * time.Second
+
+func (k *kubeMeta) get(ctx context.Context) *k8smeta.Meta {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.failed || (k.cached != nil && time.Since(k.loadedAt) < metaTTL) {
+		return k.cached
+	}
+	m, err := k.load(ctx)
+	k.loadedAt = time.Now()
+	switch {
+	case err == nil:
+		k.cached = m
+	case k.cached == nil:
+		k.failed = true
+	}
+	return k.cached
+}
+
+func (k *kubeMeta) unavailable() bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.failed
 }
 
 func (o *options) aopts() analysis.Options {

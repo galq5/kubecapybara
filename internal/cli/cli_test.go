@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/galq5/kubecapybara/internal/k8smeta"
 )
 
 func TestSplitNSAndWorkload(t *testing.T) {
@@ -102,5 +107,44 @@ func TestNetpolAsksHubForEveryFlow(t *testing.T) {
 	}
 	if err := run("--top", "5", "netpol", "shop/deploy/payments"); err == nil || !strings.Contains(err.Error(), "--top") {
 		t.Fatalf("netpol from the top 5 flows: %v", err)
+	}
+}
+
+// With --agent, a metadata reload that fails (a slow LIST of a big
+// cluster) keeps the names it had; only a cluster that never answered is
+// given up on.
+func TestAgentModeKeepsMetadataOnReloadFailure(t *testing.T) {
+	var calls int
+	results := []*k8smeta.Meta{{}, nil, {}}
+	km := &kubeMeta{load: func(context.Context) (*k8smeta.Meta, error) {
+		m := results[calls]
+		calls++
+		if m == nil {
+			return nil, errors.New("context deadline exceeded")
+		}
+		return m, nil
+	}}
+	ctx := context.Background()
+	first := km.get(ctx)
+	if first == nil || km.get(ctx) != first || calls != 1 {
+		t.Fatalf("first load: %v, %d calls", first, calls)
+	}
+	km.loadedAt = km.loadedAt.Add(-time.Minute)
+	if km.get(ctx) != first || km.unavailable() {
+		t.Fatal("a failed reload dropped the metadata")
+	}
+	km.loadedAt = km.loadedAt.Add(-time.Minute)
+	if m := km.get(ctx); m == first || m == nil || calls != 3 {
+		t.Fatalf("reload after the failure: %v, %d calls", m, calls)
+	}
+
+	none := &kubeMeta{load: func(context.Context) (*k8smeta.Meta, error) { calls++; return nil, errors.New("no cluster") }}
+	calls = 0
+	if none.get(ctx) != nil || !none.unavailable() {
+		t.Fatal("first load failed: metadata unavailable")
+	}
+	none.loadedAt = none.loadedAt.Add(-time.Hour)
+	if none.get(ctx) != nil || calls != 1 {
+		t.Fatalf("a cluster that never answered is tried again (%d calls)", calls)
 	}
 }

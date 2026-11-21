@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -293,5 +294,106 @@ func TestSeenCgroupsArePruned(t *testing.T) {
 	a.pruneSeen(now)
 	if len(a.seen) != 2 || a.seen[live].IsZero() || a.seen["/kubepods/pod99999999-2222-3333-4444-555555555555/just-exited"].IsZero() {
 		t.Fatalf("seen after pruning: %v", a.seen)
+	}
+}
+
+// Stopping a pod is not a crash, whatever its containers' main processes
+// do on SIGTERM; a container that dies on its own meanwhile still is.
+func TestPodDeletionIsNotACrash(t *testing.T) {
+	root := t.TempDir()
+	cg := func(p string) uint64 {
+		if err := os.MkdirAll(filepath.Join(root, p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		var st syscall.Stat_t
+		if err := syscall.Stat(filepath.Join(root, p), &st); err != nil {
+			t.Fatal(err)
+		}
+		return st.Ino
+	}
+	const pod = "/kubepods/pod11111111-2222-3333-4444-555555555555"
+	app, side, pause := cg(pod+"/app"), cg(pod+"/sidecar"), cg(pod+"/pause")
+	other, otherPause := cg("/kubepods/pod99999999-2222-3333-4444-555555555555/app"), cg("/kubepods/pod99999999-2222-3333-4444-555555555555/pause")
+	host := cg("/system.slice/containerd.service")
+	comm := func(s string) (out [16]int8) {
+		for i := 0; i < len(s); i++ {
+			out[i] = int8(s[i])
+		}
+		return
+	}
+	a := &Agent{resolver: cgroups.NewResolver(root), rec: NewRecorder(), clock: newClock(), seen: map[string]time.Time{}}
+	c := &procCollector{a: a, terminating: map[string]time.Time{}}
+	ts := monoNow()
+	signal := func(code int32, from uint64, fromPid uint32, fromComm string, to uint64, pid uint32) {
+		ts += 1e8
+		c.handle(&bpf.ProcCapyProcEvent{Ts: ts, Type: procEvSignal, Cgroup: from, Pid: fromPid, Comm: comm(fromComm),
+			Code: code, TargetPid: pid, TargetNsPid: 1, TargetCgroup: to})
+	}
+	exit := func(code int32, cg uint64, pid uint32) {
+		ts += 1e8
+		c.handle(&bpf.ProcCapyProcEvent{Ts: ts, Type: procEvExit, Cgroup: cg, Pid: pid, NsPid: 1, Code: code})
+	}
+	crashes := func() []model.CrashReport { return a.rec.Crashes(time.Time{}, time.Now().Add(time.Hour)) }
+
+	// kubectl delete pod: SIGTERM to every container, then the sandbox
+	signal(15, host, 500, "runc", app, 1001)
+	signal(15, host, 500, "runc", side, 1002)
+	exit(143<<8, app, 1001) // the JVM exits 128+SIGTERM
+	exit(1<<8, side, 1002)  // handled SIGTERM, exit status 1
+	signal(9, host, 501, "runc", pause, 1000)
+	exit(9, pause, 1000)
+	// a PID 1 without a SIGTERM handler: the kernel drops the SIGTERM
+	// unseen, the runtime kills it when the grace period ends
+	signal(9, host, 502, "runc", other, 2001)
+	exit(9, other, 2001)
+	signal(9, host, 503, "runc", otherPause, 2000)
+	exit(9, otherPause, 2000)
+	if cr := crashes(); len(cr) != 0 {
+		t.Fatalf("pod deletions reported as crashes: %+v", cr)
+	}
+
+	// the sidecar of a pod whose app is being stopped crashes on its own
+	signal(15, host, 504, "runc", app, 1011)
+	exit(1<<8, side, 1012)
+	if cr := crashes(); len(cr) != 1 || !strings.Contains(cr[0].Reason, "status 1") {
+		t.Fatalf("crash of a container that was not stopped: %+v", cr)
+	}
+	// a fault, and a SIGKILL from inside the pod (not the runtime)
+	signal(11, other, 2011, "app", other, 2011)
+	signal(9, other, 2012, "runc-lookalike", other, 2013)
+	if cr := crashes(); len(cr) != 2 || !strings.Contains(cr[1].Reason, "SIGSEGV") || !strings.Contains(cr[1].Reason, "SIGKILL") {
+		t.Fatalf("crashes: %+v", cr)
+	}
+}
+
+// The gauges of a deleted pod leave /metrics within a minute or two
+// instead of adding its last memory reading to every sum for 30 minutes;
+// counters of a quiet entity are kept (a gap would read as a reset).
+func TestGaugesOfGoneEntitiesExpire(t *testing.T) {
+	m := newMetrics(nil)
+	w := NewWindow(time.Now(), time.Now())
+	for _, id := range []string{"pod:gone", "pod:live"} {
+		e := w.Entity(id)
+		e.Res = &model.Resources{MemCurrent: 1 << 30, Throttled: 3, SampledAt: time.Now()}
+	}
+	m.observe(w)
+	m.mu.Lock()
+	for _, s := range m.vals {
+		s.updated = s.updated.Add(-2 * time.Minute)
+	}
+	m.mu.Unlock()
+	w = NewWindow(time.Now(), time.Now())
+	w.Entity("pod:live").Res = &model.Resources{MemCurrent: 1 << 30, SampledAt: time.Now()}
+	m.observe(w)
+	var b strings.Builder
+	m.write(&b)
+	out := b.String()
+	if strings.Contains(out, `capybara_memory_bytes{entity="pod:gone"`) {
+		t.Error("memory gauge of a pod gone for 2 minutes is still exported")
+	}
+	for _, want := range []string{`capybara_memory_bytes{entity="pod:live"`, `capybara_cpu_throttled_periods_total{entity="pod:gone"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
 	}
 }

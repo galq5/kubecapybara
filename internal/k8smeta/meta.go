@@ -77,8 +77,12 @@ type Container struct {
 	CPULimitMilli   int64     `json:"cpuLimitMilli,omitempty"`
 	MemRequest      int64     `json:"memRequest,omitempty"`
 	CPURequestMilli int64     `json:"cpuRequestMilli,omitempty"`
-	Init            bool      `json:"init,omitempty"`
-	Probes          []Probe   `json:"probes,omitempty"`
+	// Init is an init container that runs to completion before the
+	// others start. A native sidecar (an init container with restartPolicy
+	// Always) runs alongside them for the life of the pod: Sidecar, not Init.
+	Init    bool    `json:"init,omitempty"`
+	Sidecar bool    `json:"sidecar,omitempty"`
+	Probes  []Probe `json:"probes,omitempty"`
 }
 
 // Probe describes a liveness/readiness/startup probe.
@@ -332,7 +336,8 @@ func convertPod(p *corev1.Pod) *Pod {
 		status[cs.Name] = cs
 	}
 	add := func(c corev1.Container, init bool) {
-		ct := Container{Name: c.Name, Image: c.Image, Init: init}
+		sidecar := init && c.RestartPolicy != nil && *c.RestartPolicy == corev1.ContainerRestartPolicyAlways
+		ct := Container{Name: c.Name, Image: c.Image, Init: init && !sidecar, Sidecar: sidecar}
 		for _, port := range c.Ports {
 			ct.Ports = append(ct.Ports, port.ContainerPort)
 		}
@@ -479,8 +484,9 @@ func LoadPodEvents(ctx context.Context, cs kubernetes.Interface, ns, uid string)
 	return out, nil
 }
 
-// PodRequests sums the CPU (millicores) and memory requests and limits of
-// the regular containers of a pod.
+// Requests sums the CPU (millicores) and memory requests and limits of
+// the containers that run for the life of the pod (regular containers and
+// native sidecars).
 func (p *Pod) Requests() (cpuReq, cpuLim, memReq, memLim int64) {
 	for _, c := range p.Containers {
 		if c.Init {

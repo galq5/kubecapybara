@@ -248,3 +248,36 @@ func TestDNSErrorsNameTheWorstNames(t *testing.T) {
 		t.Fatalf("worst failing name missing: %+v", fs)
 	}
 }
+
+// The controller names a finding's object after its first subject: equal
+// scores must not let map order pick it (objects flapping, notifications
+// firing again).
+func TestFindingSubjectsDoNotDependOnMapOrder(t *testing.T) {
+	now := time.Now()
+	m := &k8smeta.Meta{Pods: map[string]*k8smeta.Pod{}, Nodes: map[string]*k8smeta.Node{}}
+	s := &model.Snapshot{Node: "node", From: now.Add(-time.Minute), To: now, Entities: map[string]*model.EntityStats{}}
+	for i, n := range []string{"d", "b", "a", "c"} {
+		m.Pods[n] = &k8smeta.Pod{UID: n, Namespace: "ns", Name: n, Node: "node", Workload: "Deployment/" + n, IP: "10.0.0." + itoa(i+1),
+			Containers: []k8smeta.Container{{Name: "app", StateReason: "CrashLoopBackOff", Restarts: 5, LastFinished: now}}}
+		s.Entities["pod:"+n] = &model.EntityStats{DNS: &model.DNSStats{Queries: 10, NdotsWaste: 5}}
+		s.Drops = append(s.Drops, &model.Drop{Src: "10.0.0." + itoa(i+1), Dst: "10.0.1.1", Port: 5432, Proto: "tcp", Reason: "NETFILTER_DROP", Count: 3})
+	}
+	m.Index()
+	for name, rule := range map[string]func(*View) []Finding{"restarts": ruleRestarts, "policy-denials": rulePolicyDenials, "dns-ndots": ruleNdots} {
+		var first []string
+		for i := 0; i < 30; i++ {
+			fs := rule(Build([]*model.Snapshot{s}, m, Options{}))
+			if len(fs) != 1 || len(fs[0].Subjects) != 4 {
+				t.Fatalf("%s: %+v", name, fs)
+			}
+			if first == nil {
+				first = fs[0].Subjects
+				if first[0] != "pod:a" {
+					t.Errorf("%s: first subject %s, want pod:a", name, first[0])
+				}
+			} else if strings.Join(fs[0].Subjects, " ") != strings.Join(first, " ") {
+				t.Fatalf("%s: subjects %v, then %v", name, first, fs[0].Subjects)
+			}
+		}
+	}
+}

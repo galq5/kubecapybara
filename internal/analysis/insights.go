@@ -270,7 +270,22 @@ func PolicyDenials(v *View) []Denial {
 	for _, d := range by {
 		out = append(out, *d)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Count > out[j].Count })
+	// equal counts are common (the same SYN retries from every client):
+	// order them by name so the first subject does not depend on map order
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		switch {
+		case a.Count != b.Count:
+			return a.Count > b.Count
+		case a.Src.ID != b.Src.ID:
+			return a.Src.ID < b.Src.ID
+		case a.Dst.ID != b.Dst.ID:
+			return a.Dst.ID < b.Dst.ID
+		case a.Port != b.Port:
+			return a.Port < b.Port
+		}
+		return a.Proto < b.Proto
+	})
 	return out
 }
 

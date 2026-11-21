@@ -19,12 +19,16 @@ import (
 // Pod entities carry a pod_uid label that can be joined with
 // kube_pod_info{uid=...} from kube-state-metrics.
 type metrics struct {
-	a       *Agent
-	mu      sync.Mutex
-	vals    map[string]*promSeries
-	types   map[string]string
-	help    map[string]string
-	maxIdle time.Duration
+	a     *Agent
+	mu    sync.Mutex
+	vals  map[string]*promSeries
+	types map[string]string
+	help  map[string]string
+	// maxIdle is how long a counter is kept without updates (its entity
+	// may only be quiet); gaugeIdle the same for gauges, which are set
+	// every collection while their entity exists: the memory of a deleted
+	// pod must not keep adding to its namespace.
+	maxIdle, gaugeIdle time.Duration
 }
 
 type promSeries struct {
@@ -36,7 +40,12 @@ type promSeries struct {
 }
 
 func newMetrics(a *Agent) *metrics {
-	return &metrics{a: a, vals: map[string]*promSeries{}, types: map[string]string{}, help: map[string]string{}, maxIdle: 30 * time.Minute}
+	gaugeIdle := time.Minute
+	if a != nil && 3*a.cfg.Interval > gaugeIdle {
+		gaugeIdle = 3 * a.cfg.Interval
+	}
+	return &metrics{a: a, vals: map[string]*promSeries{}, types: map[string]string{}, help: map[string]string{},
+		maxIdle: 30 * time.Minute, gaugeIdle: gaugeIdle}
 }
 
 // labelEscaper escapes a label value for the Prometheus text format, which
@@ -218,7 +227,11 @@ func (m *metrics) observe(w *Window) {
 	m.counter("capybara_conntrack_insert_failed_total", "Conntrack insert failures (SNAT port races).", "", float64(n.ConntrackInsertFailed), now)
 
 	for k, s := range m.vals {
-		if now.Sub(s.updated) > m.maxIdle {
+		idle := m.maxIdle
+		if m.types[s.name] == "gauge" {
+			idle = m.gaugeIdle
+		}
+		if now.Sub(s.updated) > idle {
 			delete(m.vals, k)
 		}
 	}

@@ -236,24 +236,34 @@ func lastN(evs []model.Event, n int) []model.Event {
 }
 
 func ruleRestarts(v *View) []Finding {
-	var lines []string
-	var subjects []string
+	type item struct{ line, subject string }
+	var items []item
 	for _, p := range v.Meta.Pods {
 		if v.Opts.Namespace != "" && p.Namespace != v.Opts.Namespace {
 			continue
 		}
 		for _, c := range p.Containers {
 			if c.StateReason == "CrashLoopBackOff" || (c.Restarts >= 3 && !c.LastFinished.IsZero() && c.LastFinished.After(v.From.Add(-30*time.Minute))) {
-				lines = append(lines, fmt.Sprintf("%s/%s container %s: %d restarts, last %s (exit %d) %s",
-					p.Namespace, p.Name, c.Name, c.Restarts, c.LastReason, c.LastExitCode, Ago(c.LastFinished)))
-				subjects = append(subjects, "pod:"+p.UID)
+				items = append(items, item{fmt.Sprintf("%s/%s container %s: %d restarts, last %s (exit %d) %s",
+					p.Namespace, p.Name, c.Name, c.Restarts, c.LastReason, c.LastExitCode, Ago(c.LastFinished)), "pod:" + p.UID})
 			}
 		}
 	}
-	if len(lines) == 0 {
+	if len(items) == 0 {
 		return nil
 	}
-	sort.Strings(lines)
+	// subjects in the order of the lines, not of the pod map: the first one
+	// names the finding's CapyFinding object
+	sort.Slice(items, func(i, j int) bool { return items[i].line < items[j].line })
+	var lines, subjects []string
+	seen := map[string]bool{}
+	for _, it := range items {
+		lines = append(lines, it.line)
+		if !seen[it.subject] {
+			seen[it.subject] = true
+			subjects = append(subjects, it.subject)
+		}
+	}
 	return []Finding{{
 		Severity: SevCrit, Category: "crash",
 		Title:    fmt.Sprintf("%d container(s) restarting repeatedly", len(lines)),
@@ -301,7 +311,7 @@ func ruleNdots(v *View) []Finding {
 	}
 	var items []item
 	var total uint64
-	for _, e := range v.Entities {
+	for _, e := range sortedEntities(v) {
 		d := e.Stats.DNS
 		if d == nil || d.NdotsWaste < 3 || float64(d.NdotsWaste) < 0.1*float64(d.Queries) {
 			continue
@@ -312,7 +322,7 @@ func ruleNdots(v *View) []Finding {
 	if len(items) == 0 {
 		return nil
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].waste > items[j].waste })
+	sort.SliceStable(items, func(i, j int) bool { return items[i].waste > items[j].waste })
 	f := Finding{
 		Severity: SevWarn, Category: "dns",
 		Title: fmt.Sprintf("ndots:5 search-path expansion wastes %s DNS lookups/s across %d workload(s)", Rate(v.PerSec(total)), len(items)),

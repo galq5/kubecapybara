@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +36,7 @@ var shellWrappers = map[string]bool{
 }
 
 // (comm is truncated to 15 chars, e.g. "containerd-shim", "runc:[2:INIT]").
-var runtimeParents = []string{"runc", "crun", "conmon", "containerd-shim", "youki"}
+var runtimeParents = []string{"runc", "crun", "conmon", "containerd-shim", "youki", "crio"}
 
 func isRuntime(comm string) bool {
 	for _, r := range runtimeParents {
@@ -53,10 +54,17 @@ type procCollector struct {
 	l    linker
 	rd   *ringbuf.Reader
 
-	// entity -> time a SIGTERM was delivered to the container's PID 1
-	// (pod deletion, rollout, eviction, liveness restart): the exit that
-	// follows is a requested termination, not a crash.
+	// termKey(entity, pid) of a container's PID 1 -> when its termination
+	// was requested: a SIGTERM, or any signal from the container runtime
+	// (pod deletion, rollout, eviction, liveness restart, and the SIGKILL
+	// after the grace period). The exit that follows is not a crash. Keyed
+	// by process, not pod: the containers of a pod stop one by one, and the
+	// pod sandbox (pause) only ever gets the runtime's SIGKILL.
 	terminating map[string]time.Time
+}
+
+func termKey(entity string, pid uint32) string {
+	return entity + "|" + strconv.FormatUint(uint64(pid), 10)
 }
 
 // terminationGrace is how long after a SIGTERM to PID 1 an exit (or the
@@ -71,16 +79,27 @@ func RedactArgs(args string) string {
 	return secretArg.ReplaceAllString(args, "${1}***")
 }
 
-// isTermination reports whether an exit/kill of PID 1 is a requested
-// termination rather than a crash.
-func (c *procCollector) isTermination(entity string, sig, status int32, t time.Time) bool {
+// isTermination reports whether an exit/kill of a container's PID 1
+// (termKey) is a requested termination rather than a crash.
+func (c *procCollector) isTermination(key string, sig, status int32, t time.Time) bool {
 	if sig == 15 || status == 143 {
 		return true
 	}
-	if at, ok := c.terminating[entity]; ok && t.Sub(at) < terminationGrace {
+	if at, ok := c.terminating[key]; ok && t.Sub(at) < terminationGrace {
 		return true
 	}
 	return false
+}
+
+func (c *procCollector) markTerminating(key string, t time.Time) {
+	c.terminating[key] = t
+	if len(c.terminating) > 4096 {
+		for k, at := range c.terminating {
+			if t.Sub(at) > terminationGrace {
+				delete(c.terminating, k)
+			}
+		}
+	}
 }
 
 func (c *procCollector) Name() string { return "proc" }
@@ -184,14 +203,15 @@ func (c *procCollector) handle(ev *bpf.ProcCapyProcEvent) {
 		sev := model.SevInfo
 		crashed := false
 		if ev.NsPid == 1 {
+			key := termKey(info.Entity, ev.Pid)
 			msg = "container main process: " + msg
-			if c.isTermination(info.Entity, sig, status, t) {
+			if c.isTermination(key, sig, status, t) {
 				msg += " (termination requested)"
 			} else {
 				sev = model.SevCrit
 				crashed = true
 			}
-			delete(c.terminating, info.Entity)
+			delete(c.terminating, key)
 		}
 		a.rec.Add(model.Event{
 			Time: t, Entity: info.Entity, Type: model.EvExit, Severity: sev, PID: ev.Pid, Comm: comm, Message: msg,
@@ -225,16 +245,17 @@ func (c *procCollector) handle(ev *bpf.ProcCapyProcEvent) {
 			Fields: map[string]string{"signal": sname, "sender": comm, "senderPid": fmt.Sprint(ev.Pid), "senderEntity": sender.Entity, "nsPid": fmt.Sprint(ev.TargetNsPid)},
 		})
 		if ev.TargetNsPid == 1 {
-			if ev.Code == 15 {
-				c.terminating[target.Entity] = t
-				if len(c.terminating) > 4096 {
-					for k, at := range c.terminating {
-						if t.Sub(at) > terminationGrace {
-							delete(c.terminating, k)
-						}
-					}
-				}
-			} else if !(ev.Code == 9 && c.isTermination(target.Entity, 0, 0, t)) {
+			key := termKey(target.Entity, ev.TargetPid)
+			// The runtime (runc kill, outside the pod) stops containers: its
+			// SIGKILL ends the grace period, kills a PID 1 that ignores
+			// SIGTERM (no handler: the kernel drops it unseen) and tears
+			// down the pod sandbox.
+			fromRuntime := ev.Pid != ev.TargetPid && sender.Entity != target.Entity && isRuntime(comm)
+			switch {
+			case ev.Code == 15 || fromRuntime:
+				c.markTerminating(key, t)
+			case ev.Code == 9 && c.isTermination(key, 0, 0, t):
+			default:
 				a.rec.Crash(target.Entity, msg, t)
 			}
 		}
