@@ -401,6 +401,12 @@ func (v *View) buildEdges(listeners map[string]string) {
 			stats.RstSent += f.serverSide.RstSent
 			// the server socket sees the client's window (slow clients)
 			stats.ZeroWindow += f.serverSide.ZeroWindow
+			// each socket retransmits its own segments: losses on the way
+			// back (large responses through an MTU black hole) are only
+			// visible on the server socket
+			stats.Retrans += f.serverSide.Retrans
+			stats.RetransLarge += f.serverSide.RetransLarge
+			stats.MTUReduced += f.serverSide.MTUReduced
 			side = "both"
 		case f.clientSide != nil:
 			stats = f.clientSide.Clone()
@@ -431,8 +437,18 @@ func (v *View) buildEdges(listeners map[string]string) {
 		} else {
 			server = v.IPEndpoint(k.server, node)
 			if server.Kind == KindLocal || server.Kind == KindNode {
-				if owner, ok := listeners[node+"|"+itoa(int(k.port))]; ok {
-					server = v.EntityEndpoint(owner, node)
+				// a node address is served by a listener of that node, not
+				// of the node the client side was observed on
+				ln := node
+				if server.Kind == KindNode {
+					ln = server.Node
+				}
+				if owner, ok := listeners[ln+"|"+itoa(int(k.port))]; ok {
+					ip := server.IP
+					server = v.EntityEndpoint(owner, ln)
+					if server.IP == "" && !isLoopback(ip) {
+						server.IP = ip
+					}
 				}
 			}
 		}

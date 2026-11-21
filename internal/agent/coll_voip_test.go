@@ -92,6 +92,33 @@ func TestSIPTrackerFailuresAndTimeouts(t *testing.T) {
 	}
 }
 
+// A 1xx stops Timer B: a call ringing for longer than 32s is not a lost
+// INVITE, and its late answer still counts.
+func TestSIPLongRingingIsNotATimeout(t *testing.T) {
+	tr := newSIPTracker()
+	fs := "pod:fs"
+	tr.handle(fs, "10.0.0.9", 0, true, sipReq("INVITE", "c9", 1))
+	tr.handle(fs, "10.0.0.9", 100*ms, false, sipResp(100, "INVITE", "c9", 1))
+	tr.handle(fs, "10.0.0.9", 1000*ms, false, sipResp(180, "INVITE", "c9", 1))
+	cur, evs := tr.collect(40000 * ms)
+	if inv := cur[fs].Methods["uac INVITE"]; len(evs) != 0 || inv.Timeouts != 0 {
+		t.Fatalf("ringing call timed out: %+v %v", inv, evs)
+	}
+	tr.handle(fs, "10.0.0.9", 45000*ms, false, sipResp(200, "INVITE", "c9", 1))
+	cur, _ = tr.collect(46000 * ms)
+	if inv := cur[fs].Methods["uac INVITE"]; inv == nil || inv.Codes["200"] != 1 || cur[fs].CallsActive != 1 {
+		t.Fatalf("late answer lost: %+v, %d active calls", inv, cur[fs].CallsActive)
+	}
+
+	// a call that rings forever still ends as a timeout
+	tr.handle(fs, "10.0.0.9", 50000*ms, true, sipReq("INVITE", "c10", 1))
+	tr.handle(fs, "10.0.0.9", 50100*ms, false, sipResp(180, "INVITE", "c10", 1))
+	cur, evs = tr.collect(50000*ms + uint64(sipProceedingTimeout) + 1000*ms)
+	if inv := cur[fs].Methods["uac INVITE"]; inv.Timeouts != 1 || len(evs) != 1 {
+		t.Fatalf("stuck INVITE: %+v %v", inv, evs)
+	}
+}
+
 func TestRTPDelta(t *testing.T) {
 	// first read: 100 expected, 97 received
 	d := rtpDelta(rtpCounters{}, rtpCounters{Packets: 97, Expected: 100}, false)

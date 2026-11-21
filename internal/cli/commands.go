@@ -459,6 +459,13 @@ func (o *options) cmdNetpol() *cobra.Command {
 			if o.window < 10*time.Minute {
 				o.window = time.Hour
 			}
+			// a policy built from the busiest flows only would block the rest
+			if hs, ok := o.src.(*client.HubSource); ok {
+				if o.topSet && o.top > 0 {
+					return fmt.Errorf("netpol needs every observed flow: drop --top")
+				}
+				hs.Top, hs.TopSet = 0, true
+			}
 			res, err := o.load(cmd.Context(), false)
 			if err != nil {
 				return err

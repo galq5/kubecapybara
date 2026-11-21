@@ -83,36 +83,51 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 
 	ingress := map[peerKey]networkingv1.NetworkPolicyPeer{}
 	egress := map[peerKey]networkingv1.NetworkPolicyPeer{}
-	var notes []string
+	var notes, uncovered []string
 	var unsafePeer string
 	dns := false
 
-	peerFor := func(ep Endpoint, port uint16) (networkingv1.NetworkPolicyPeer, intstr.IntOrString, bool) {
+	// ipPeer allows one address (a /32 or /128 block).
+	ipPeer := func(ip string) (networkingv1.NetworkPolicyPeer, bool) {
+		a, err := netip.ParseAddr(ip)
+		if err != nil || a.IsLoopback() {
+			return networkingv1.NetworkPolicyPeer{}, false
+		}
+		bits := 32
+		if a.Is6() {
+			bits = 128
+		}
+		return networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: fmt.Sprintf("%s/%d", a.WithZone(""), bits)}}, true
+	}
+	// peersFor returns the peers that allow traffic with ep on port (for a
+	// Service: its backends on the target port, as policies see the
+	// connection after the Service address is translated).
+	peersFor := func(ep Endpoint, port uint16) ([]networkingv1.NetworkPolicyPeer, intstr.IntOrString, bool) {
 		switch ep.Kind {
 		case KindPod:
 			p := v.Meta.Pods[strings.TrimPrefix(ep.ID, "pod:")]
 			if p == nil {
-				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
+				return nil, intstr.IntOrString{}, false
 			}
 			selector := stableLabels(v.Meta, p)
 			if len(selector) == 0 {
 				unsafePeer = p.Namespace + "/" + p.Name
-				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
+				return nil, intstr.IntOrString{}, false
 			}
 			for _, other := range v.Meta.Pods {
 				if other.Namespace == p.Namespace && other.Workload != p.Workload && k8smeta.Matches(selector, other.Labels) {
 					unsafePeer = p.Namespace + "/" + p.Name
-					return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
+					return nil, intstr.IntOrString{}, false
 				}
 			}
-			return networkingv1.NetworkPolicyPeer{
+			return []networkingv1.NetworkPolicyPeer{{
 				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": p.Namespace}},
 				PodSelector:       &metav1.LabelSelector{MatchLabels: selector},
-			}, intstr.FromInt32(int32(port)), true
+			}}, intstr.FromInt32(int32(port)), true
 		case KindService:
 			s := v.Meta.Service(ep.Namespace, ep.Name)
-			if s == nil || len(s.Selector) == 0 {
-				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
+			if s == nil {
+				return nil, intstr.IntOrString{}, false
 			}
 			target := intstr.FromInt32(int32(port))
 			for _, sp := range s.Ports {
@@ -124,25 +139,42 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 					}
 				}
 			}
-			return networkingv1.NetworkPolicyPeer{
+			if len(s.Selector) == 0 {
+				// no pods to select: the endpoints of default/kubernetes are
+				// the API servers; others are maintained by hand
+				var peers []networkingv1.NetworkPolicyPeer
+				if s.Namespace == "default" && s.Name == "kubernetes" && target.Type == intstr.Int {
+					for _, ip := range v.Meta.APIServerIPs {
+						if p, ok := ipPeer(ip); ok {
+							peers = append(peers, p)
+						}
+					}
+				}
+				if len(peers) == 0 {
+					uncovered = append(uncovered, fmt.Sprintf("svc/%s/%s:%d (a Service without a selector: allow its endpoint addresses)", s.Namespace, s.Name, port))
+					return nil, intstr.IntOrString{}, false
+				}
+				notes = append(notes, fmt.Sprintf("svc/%s/%s = the API server endpoints %s", s.Namespace, s.Name, strings.Join(v.Meta.APIServerIPs, ", ")))
+				return peers, target, true
+			}
+			return []networkingv1.NetworkPolicyPeer{{
 				NamespaceSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"kubernetes.io/metadata.name": s.Namespace}},
 				PodSelector:       &metav1.LabelSelector{MatchLabels: s.Selector},
-			}, target, true
-		case KindExternal, KindNode, KindUnknown:
-			a, err := netip.ParseAddr(ep.IP)
-			if err != nil {
-				return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
-			}
-			bits := 32
-			if a.Is6() {
-				bits = 128
+			}}, target, true
+		case KindExternal, KindNode, KindUnknown, KindHost:
+			p, ok := ipPeer(ep.IP)
+			if !ok {
+				if ep.Kind == KindHost {
+					uncovered = append(uncovered, fmt.Sprintf("%s:%d (a host process at an unknown address)", ep.Display(), port))
+				}
+				return nil, intstr.IntOrString{}, false
 			}
 			if ep.DNSName != "" {
 				notes = append(notes, fmt.Sprintf("%s = %s (IPs behind DNS names change; consider an egress gateway or FQDN policies)", ep.IP, ep.DNSName))
 			}
-			return networkingv1.NetworkPolicyPeer{IPBlock: &networkingv1.IPBlock{CIDR: fmt.Sprintf("%s/%d", ep.IP, bits)}}, intstr.FromInt32(int32(port)), true
+			return []networkingv1.NetworkPolicyPeer{p}, intstr.FromInt32(int32(port)), true
 		}
-		return networkingv1.NetworkPolicyPeer{}, intstr.IntOrString{}, false
+		return nil, intstr.IntOrString{}, false
 	}
 	keyOf := func(p networkingv1.NetworkPolicyPeer, port intstr.IntOrString) peerKey {
 		b, _ := yaml.Marshal(p)
@@ -157,21 +189,27 @@ func SuggestNetworkPolicy(v *View, ns, workload string) (string, error) {
 			if e.Client.Kind == KindHost || e.Client.Kind == KindLocal {
 				continue // kubelet probes / node-local traffic are always allowed
 			}
-			if peer, port, ok := peerFor(e.Client, e.Port); ok {
+			peers, port, _ := peersFor(e.Client, e.Port)
+			for _, peer := range peers {
 				ingress[keyOf(peer, port)] = peer
 			}
 		}
 		if ids[e.Client.ID] {
-			if e.Server.Kind == KindLocal {
-				continue
+			if e.Server.Kind == KindLocal || isLoopback(e.Server.IP) {
+				continue // loopback never leaves the network namespace
 			}
-			if peer, port, ok := peerFor(e.Server, e.Port); ok {
+			peers, port, _ := peersFor(e.Server, e.Port)
+			for _, peer := range peers {
 				egress[keyOf(peer, port)] = peer
 			}
 		}
 	}
 	if unsafePeer != "" {
 		return "", fmt.Errorf("no unique workload selector for observed peer %s", unsafePeer)
+	}
+	if len(uncovered) > 0 {
+		sort.Strings(uncovered)
+		return "", fmt.Errorf("observed traffic a NetworkPolicy generated from it could not allow, so it would be blocked: %s", strings.Join(uniq(uncovered), "; "))
 	}
 	for id := range ids {
 		if e := v.Entities[id]; e != nil && e.Stats.DNS != nil && e.Stats.DNS.Queries > 0 {

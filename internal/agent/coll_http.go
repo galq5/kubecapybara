@@ -15,8 +15,6 @@ import (
 	"github.com/galq5/kubecapybara/internal/model"
 )
 
-const maxEndpointsPerEntity = 200
-
 // httpCollector: plaintext HTTP/1.x RED metrics per route.
 type httpCollector struct {
 	a    *Agent
@@ -229,7 +227,7 @@ func (c *httpCollector) handle(ev *bpf.HttpHttpEvent) {
 	key := role + " " + method + " " + path
 	ep, ok := e.HTTP[key]
 	if !ok {
-		if len(e.HTTP) >= maxEndpointsPerEntity {
+		if len(e.HTTP) >= model.MaxHTTPEndpoints {
 			path = "(other)"
 			key = role + " " + method + " " + path
 			ep = e.HTTP[key]

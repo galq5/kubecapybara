@@ -1,8 +1,9 @@
 package hub
 
 import (
+	"cmp"
 	"net/netip"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/galq5/kubecapybara/internal/k8smeta"
@@ -124,16 +125,23 @@ func entityProblems(e *model.EntityStats) uint64 {
 
 // topKeys returns the union of the n highest keys by each score.
 func topKeys[K comparable](scores map[K][2]uint64, n int) map[K]bool {
-	keys := make([]K, 0, len(scores))
-	for k := range scores {
-		keys = append(keys, k)
+	// sort the scores themselves: looking them up by key in every
+	// comparison (hashing three strings per flow) made scoping a large
+	// cluster take seconds
+	type scored struct {
+		key   K
+		score [2]uint64
 	}
-	out := map[K]bool{}
+	all := make([]scored, 0, len(scores))
+	for k, s := range scores {
+		all = append(all, scored{k, s})
+	}
+	out := make(map[K]bool, 2*n)
 	for dim := 0; dim < 2; dim++ {
-		sort.SliceStable(keys, func(i, j int) bool { return scores[keys[i]][dim] > scores[keys[j]][dim] })
-		for i := 0; i < len(keys) && i < n; i++ {
-			if scores[keys[i]][dim] > 0 || dim == 0 {
-				out[keys[i]] = true
+		slices.SortFunc(all, func(a, b scored) int { return cmp.Compare(b.score[dim], a.score[dim]) })
+		for i := 0; i < len(all) && i < n; i++ {
+			if all[i].score[dim] > 0 || dim == 0 {
+				out[all[i].key] = true
 			}
 		}
 	}

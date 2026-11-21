@@ -19,13 +19,17 @@ import (
 )
 
 const (
-	sipTimeout     = 32 * time.Second // RFC 3261 Timer B/F (64*T1)
-	sipCallMaxAge  = 12 * time.Hour   // forget calls whose BYE we missed
-	rtpStreamIdle  = time.Minute
-	sipMaxPending  = 200000
-	sipMaxCalls    = 200000
-	defaultRTPLow  = 16384
-	defaultRTPHigh = 32768
+	sipTimeout = 32 * time.Second // RFC 3261 Timer B/F (64*T1)
+	// sipProceedingTimeout bounds an INVITE that got a provisional
+	// response: a 1xx stops Timer B and the call may ring for a minute or
+	// more before it is answered (RFC 3261 Timer C, > 3 minutes).
+	sipProceedingTimeout = 3 * time.Minute
+	sipCallMaxAge        = 12 * time.Hour // forget calls whose BYE we missed
+	rtpStreamIdle        = time.Minute
+	sipMaxPending        = 200000
+	sipMaxCalls          = 200000
+	defaultRTPLow        = 16384
+	defaultRTPHigh       = 32768
 )
 
 // voipCollector: SIP signalling (setup latency, response codes, answer
@@ -492,13 +496,17 @@ func (t *sipTracker) handle(entity, peer string, ts uint64, egress bool, m *sipp
 func (t *sipTracker) collect(now uint64) (map[string]*model.SIPStats, []model.Event) {
 	var evs []model.Event
 	for k, tx := range t.pending {
-		if now > tx.ts && now-tx.ts > uint64(sipTimeout) {
+		timeout := sipTimeout
+		if k.method == "INVITE" && tx.first {
+			timeout = sipProceedingTimeout // ringing: not a lost INVITE
+		}
+		if now > tx.ts && now-tx.ts > uint64(timeout) {
 			delete(t.pending, k)
 			t.stats(k.entity).Method(k.role, k.method).Timeouts++
 			if k.method == "INVITE" && k.role == "uac" {
 				evs = append(evs, model.Event{
 					Entity: k.entity, Type: model.EvSIP, Severity: model.SevWarn,
-					Message: fmt.Sprintf("SIP INVITE %s to %s got no final response within %s", tx.uri, tx.peer, sipTimeout),
+					Message: fmt.Sprintf("SIP INVITE %s to %s got no final response within %s", tx.uri, tx.peer, timeout),
 					Fields:  map[string]string{"code": "timeout", "role": k.role, "peer": tx.peer},
 				})
 			}

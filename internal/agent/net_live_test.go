@@ -29,7 +29,7 @@ func TestListenerSurvivesAccept(t *testing.T) {
 	a := &Agent{
 		cfg: Config{ProcRoot: "/proc"}, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		resolver: cgroups.NewResolver(root), rec: NewRecorder(), clock: newClock(),
-		status: map[string]string{}, seen: map[string]bool{},
+		status: map[string]string{}, seen: map[string]time.Time{},
 	}
 	c := &netCollector{}
 	a.net = c

@@ -51,18 +51,25 @@ type Webhook struct {
 	Client *http.Client
 }
 
+// slackEscaper escapes the characters Slack gives a meaning to. Findings
+// quote observed data (command lines, DNS names, HTTP paths, SQL): left as
+// is, a workload could put <!channel> mentions or disguised <url|links>
+// into the alert channel.
+var slackEscaper = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;")
+
 // SlackText formats a notification for chat.
 func SlackText(n Notification) string {
 	icon := map[string]string{"CRIT": ":red_circle:", "WARN": ":large_orange_circle:", "INFO": ":large_blue_circle:"}[n.Severity]
+	esc := slackEscaper.Replace
 	var b strings.Builder
 	if n.Event == "resolved" {
 		icon = ":white_check_mark:"
-		fmt.Fprintf(&b, "%s *resolved* %s", icon, n.Title)
+		fmt.Fprintf(&b, "%s *resolved* %s", icon, esc(n.Title))
 	} else {
-		fmt.Fprintf(&b, "%s *%s* %s", icon, n.Severity, n.Title)
+		fmt.Fprintf(&b, "%s *%s* %s", icon, esc(n.Severity), esc(n.Title))
 	}
 	if n.Cluster != "" {
-		fmt.Fprintf(&b, " _(%s)_", n.Cluster)
+		fmt.Fprintf(&b, " _(%s)_", esc(n.Cluster))
 	}
 	if n.Event != "resolved" {
 		for i, d := range n.Details {
@@ -70,13 +77,13 @@ func SlackText(n Notification) string {
 				fmt.Fprintf(&b, "\n• … %d more", len(n.Details)-5)
 				break
 			}
-			fmt.Fprintf(&b, "\n• %s", d)
+			fmt.Fprintf(&b, "\n• %s", esc(d))
 		}
 		if n.Hint != "" {
-			fmt.Fprintf(&b, "\n→ %s", n.Hint)
+			fmt.Fprintf(&b, "\n→ %s", esc(n.Hint))
 		}
 	}
-	fmt.Fprintf(&b, "\n`kubectl get capyfinding -n %s %s -o yaml`", n.Namespace, n.Name)
+	fmt.Fprintf(&b, "\n`kubectl get capyfinding -n %s %s -o yaml`", esc(n.Namespace), esc(n.Name))
 	return b.String()
 }
 

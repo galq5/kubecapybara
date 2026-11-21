@@ -355,15 +355,18 @@ func ruleDNSErrors(v *View) []Finding {
 		if r > 0.2 {
 			sev = SevCrit
 		}
-		var worst []string
+		failed := map[string]uint64{}
 		for name, s := range d.Names {
 			if s.Errors+s.Timeouts > 0 {
-				worst = append(worst, fmt.Sprintf("%s(%d)", name, s.Errors+s.Timeouts))
+				failed[name] = s.Errors + s.Timeouts
 			}
 		}
-		sort.Strings(worst)
+		var worst []string // the names failing most often
+		for _, name := range top(model.SortedKeys(failed), 3) {
+			worst = append(worst, fmt.Sprintf("%s(%d)", name, failed[name]))
+		}
 		lines = append(lines, fmt.Sprintf("%s: %s of lookups failing (SERVFAIL %d, REFUSED %d, timeout %d) %s",
-			e.Endpoint.Display(), Pct(r), d.RCodes["SERVFAIL"], d.RCodes["REFUSED"], d.Timeouts, strings.Join(top(worst, 3), " ")))
+			e.Endpoint.Display(), Pct(r), d.RCodes["SERVFAIL"], d.RCodes["REFUSED"], d.Timeouts, strings.Join(worst, " ")))
 		subj = append(subj, e.ID)
 	}
 	if len(lines) == 0 {

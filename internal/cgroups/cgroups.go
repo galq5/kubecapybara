@@ -206,6 +206,17 @@ func (r *Resolver) Pods() map[string]string {
 	return out
 }
 
+// Paths returns the cgroup paths (relative to the root) found by the last scan.
+func (r *Resolver) Paths() map[string]bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make(map[string]bool, len(r.byID))
+	for _, info := range r.byID {
+		out[info.Path] = true
+	}
+	return out
+}
+
 // IDsForEntity returns all cgroup IDs (pod and container level) of an entity.
 func (r *Resolver) IDsForEntity(entity string) []uint64 {
 	r.mu.RLock()

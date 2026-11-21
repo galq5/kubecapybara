@@ -2,6 +2,8 @@ package cli
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,5 +71,36 @@ func TestIncidentRejectsAggregateBundle(t *testing.T) {
 	cmd.SetArgs([]string{"--from-file", file, "incident"})
 	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "requires live time buckets") {
 		t.Fatalf("unexpected replay result: %v", err)
+	}
+}
+
+// A NetworkPolicy built from the hub's busiest flows only would block the
+// others: netpol asks the hub for every flow, whatever its default top.
+func TestNetpolAsksHubForEveryFlow(t *testing.T) {
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing"))
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	var tops []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/snapshots" {
+			tops = append(tops, r.URL.Query().Get("top"))
+			_, _ = io.WriteString(w, `{"snapshots":[{"node":"n"}]}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+	run := func(args ...string) error {
+		root := NewRoot("test")
+		root.SetArgs(append([]string{"--hub", srv.URL, "--no-k8s"}, args...))
+		root.SetOut(io.Discard)
+		root.SetErr(io.Discard)
+		return root.Execute()
+	}
+	_ = run("netpol", "shop/deploy/payments") // no such pods: only the request matters
+	if len(tops) != 1 || tops[0] != "0" {
+		t.Fatalf("netpol asked the hub for top %q", tops)
+	}
+	if err := run("--top", "5", "netpol", "shop/deploy/payments"); err == nil || !strings.Contains(err.Error(), "--top") {
+		t.Fatalf("netpol from the top 5 flows: %v", err)
 	}
 }

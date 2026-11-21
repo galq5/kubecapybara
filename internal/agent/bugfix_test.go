@@ -241,3 +241,57 @@ func TestMetricsWritesOutsideCollectionLock(t *testing.T) {
 		t.Fatal("no metrics were written")
 	}
 }
+
+// The agent and model.EntityStats.Merge must fold routes over the
+// cardinality limit into the same "(other)" entry.
+func TestHTTPOverflowKeyMatchesMerge(t *testing.T) {
+	a := &Agent{resolver: cgroups.NewResolver(t.TempDir()), rec: NewRecorder(), clock: newClock()}
+	c := &httpCollector{a: a, cur: NewWindow(time.Time{}, time.Time{}), lastWarn: map[string]time.Time{}}
+	for i := 0; i <= model.MaxHTTPEndpoints; i++ {
+		ev := &bpf.HttpHttpEvent{Proto: protoHTTP, Role: 2, Cgroup: 1}
+		for j, b := range []byte("GET /page-" + strings.Repeat("x", i%7) + string(rune('a'+i%26)) + string(rune('a'+i/26)) + " HTTP/1.1\r\n") {
+			ev.Req[j] = int8(b)
+		}
+		for j, b := range []byte("HTTP/1.1 200 OK") {
+			ev.Resp[j] = int8(b)
+		}
+		c.handle(ev)
+	}
+	e := c.cur.Entities["cg:1"]
+	merged := &model.EntityStats{}
+	merged.Merge(e)
+	merged.Merge(&model.EntityStats{HTTP: map[string]*model.HTTPEndpoint{
+		"server GET /new": {Role: "server", Method: "GET", Path: "/new", Count: 5},
+	}})
+	var others int
+	var other, total uint64
+	for _, ep := range merged.HTTP {
+		total += ep.Count
+		if ep.Path == "(other)" {
+			others++
+			other += ep.Count
+		}
+	}
+	if others != 1 || other < 6 || total != model.MaxHTTPEndpoints+1+5 {
+		t.Fatalf("%d (other) routes with %d of %d requests, want 1 with at least 6", others, other, total)
+	}
+}
+
+// Cgroups of containers that are gone are forgotten after a while; live
+// ones and recently seen ones are kept.
+func TestSeenCgroupsArePruned(t *testing.T) {
+	root := t.TempDir()
+	const live = "/kubepods/pod11111111-2222-3333-4444-555555555555/c1"
+	if err := os.MkdirAll(filepath.Join(root, live), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &Agent{resolver: cgroups.NewResolver(root), seen: map[string]time.Time{}}
+	now := time.Now()
+	a.seen[live] = now.Add(-time.Hour)
+	a.seen["/kubepods/pod99999999-2222-3333-4444-555555555555/gone"] = now.Add(-time.Hour)
+	a.seen["/kubepods/pod99999999-2222-3333-4444-555555555555/just-exited"] = now.Add(-time.Minute)
+	a.pruneSeen(now)
+	if len(a.seen) != 2 || a.seen[live].IsZero() || a.seen["/kubepods/pod99999999-2222-3333-4444-555555555555/just-exited"].IsZero() {
+		t.Fatalf("seen after pruning: %v", a.seen)
+	}
+}

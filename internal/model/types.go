@@ -206,10 +206,13 @@ func (f *FileStats) Merge(o *FileStats) {
 // Ops returns the number of slow operations.
 func (f *FileStats) Ops() uint64 { return f.Reads + f.Writes + f.Fsyncs }
 
-// MaxDBQueries and MaxFiles bound per-entity cardinality.
+// MaxDBQueries, MaxFiles and MaxHTTPEndpoints bound per-entity
+// cardinality. Collectors enforce them per collection interval and Merge
+// over time ranges; what does not fit is folded into an "(other)" entry.
 const (
-	MaxDBQueries = 200
-	MaxFiles     = 100
+	MaxDBQueries     = 200
+	MaxFiles         = 100
+	MaxHTTPEndpoints = 200
 )
 
 // NetStats are TCP counters of a pod's network namespace (TcpExt, deltas).
@@ -288,15 +291,24 @@ func (e *EntityStats) Merge(o *EntityStats) {
 		if e.HTTP == nil {
 			e.HTTP = map[string]*HTTPEndpoint{}
 		}
-		if cur, ok := e.HTTP[k]; ok {
-			cur.Merge(v)
-		} else {
-			c := *v
-			c.Status = copyMap(v.Status)
-			c.Lat = Hist{}
-			c.Lat.Add(v.Lat)
-			e.HTTP[k] = &c
+		cur, ok := e.HTTP[k]
+		if !ok && len(e.HTTP) >= MaxHTTPEndpoints {
+			// the same "<role> <method> (other)" route the agent folds into
+			k = v.Role + " " + v.Method + " (other)"
+			if cur, ok = e.HTTP[k]; !ok {
+				cur, ok = &HTTPEndpoint{Role: v.Role, Method: v.Method, Path: "(other)"}, true
+				e.HTTP[k] = cur
+			}
 		}
+		if ok {
+			cur.Merge(v)
+			continue
+		}
+		c := *v
+		c.Status = copyMap(v.Status)
+		c.Lat = Hist{}
+		c.Lat.Add(v.Lat)
+		e.HTTP[k] = &c
 	}
 	for k, v := range o.ConnErrors {
 		if e.ConnErrors == nil {
@@ -507,10 +519,13 @@ func (d *DNSStats) Merge(o *DNSStats) {
 		cur, ok := d.Names[k]
 		if !ok {
 			if len(d.Names) >= MaxDNSNames {
-				continue
+				k = "(other)" // as Name() does: per-name failures still add up
+				cur = d.Names[k]
 			}
-			cur = &DNSName{}
-			d.Names[k] = cur
+			if cur == nil {
+				cur = &DNSName{}
+				d.Names[k] = cur
+			}
 		}
 		cur.Count += v.Count
 		cur.NXDomain += v.NXDomain

@@ -72,8 +72,9 @@ type Agent struct {
 	net      *netCollector
 	profiler *profileCollector
 
-	seenMu sync.Mutex
-	seen   map[string]bool
+	seenMu     sync.Mutex
+	seen       map[string]time.Time // cgroup path -> when first seen
+	seenPruned time.Time
 }
 
 // New creates an agent.
@@ -112,7 +113,7 @@ func New(cfg Config) (*Agent, error) {
 		rec:      NewRecorder(),
 		clock:    newClock(),
 		status:   map[string]string{},
-		seen:     map[string]bool{},
+		seen:     map[string]time.Time{},
 	}
 	a.metrics = newMetrics(a)
 	a.net = &netCollector{}
@@ -269,8 +270,31 @@ func (a *Agent) Tick(start, end time.Time) {
 		}()
 	}
 	a.rec.Prune(end)
+	a.pruneSeen(end)
 	a.store.Add(w)
 	a.metrics.observe(w)
+}
+
+// seenKeep is how long a container cgroup is remembered after it is gone
+// from the cgroup tree. Its path is never reused (it holds the container
+// ID), and the startup checks only concern the first minute of a cgroup.
+const seenKeep = 10 * time.Minute
+
+// pruneSeen forgets cgroups that no longer exist: otherwise every
+// container ever started on the node stays in the map.
+func (a *Agent) pruneSeen(now time.Time) {
+	a.seenMu.Lock()
+	defer a.seenMu.Unlock()
+	if now.Sub(a.seenPruned) < seenKeep {
+		return
+	}
+	a.seenPruned = now
+	live := a.resolver.Paths()
+	for p, at := range a.seen {
+		if !live[p] && now.Sub(at) > seenKeep {
+			delete(a.seen, p)
+		}
+	}
 }
 
 // Close detaches all programs.
@@ -315,8 +339,10 @@ func (a *Agent) noteCgroup(id uint64, at time.Time) *cgroups.Info {
 		return info
 	}
 	a.seenMu.Lock()
-	seen := a.seen[info.Path]
-	a.seen[info.Path] = true
+	_, seen := a.seen[info.Path]
+	if !seen {
+		a.seen[info.Path] = at
+	}
 	a.seenMu.Unlock()
 	if seen {
 		return info
@@ -350,11 +376,12 @@ func (a *Agent) markSeenExisting() {
 	pods := a.resolver.Pods()
 	a.seenMu.Lock()
 	defer a.seenMu.Unlock()
+	now := time.Now()
 	for uid := range pods {
 		for _, id := range a.resolver.IDsForEntity("pod:" + uid) {
 			info := a.resolver.Lookup(id)
-			if time.Since(info.Created) > time.Minute {
-				a.seen[info.Path] = true
+			if now.Sub(info.Created) > time.Minute {
+				a.seen[info.Path] = now
 			}
 		}
 	}

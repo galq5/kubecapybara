@@ -8,6 +8,7 @@ import (
 	"github.com/galq5/kubecapybara/internal/k8smeta"
 	"github.com/galq5/kubecapybara/internal/model"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"strings"
 	"testing"
 	"time"
 )
@@ -116,5 +117,22 @@ func TestPartialFailureStillDeletesExpiredFindings(t *testing.T) {
 	}
 	if n := len(list(t, c)); n != 0 {
 		t.Fatalf("expired resolved finding kept during partial failure: %d left", n)
+	}
+}
+
+// Findings quote observed data: a shell spawned with a crafted command line
+// must not ping the channel or plant a disguised link in the Slack alert.
+func TestSlackTextEscapesObservedData(t *testing.T) {
+	text := SlackText(Notification{Event: "firing", Namespace: "shop", Name: "exec-shell-1", Severity: "WARN",
+		Title:   "1 shell(s) spawned by application processes",
+		Details: []string{"shop/api: shell sh spawned by api (pid 7): sh -c <!channel> <https://evil.example|open the runbook> & more"},
+		Hint:    "kubectl capybara why-crash <pod>"})
+	for _, bad := range []string{"<!channel>", "<https://", "<pod>", " & "} {
+		if strings.Contains(text, bad) {
+			t.Fatalf("unescaped %q in %q", bad, text)
+		}
+	}
+	if !strings.Contains(text, "&lt;!channel&gt;") || !strings.Contains(text, "&amp;") {
+		t.Fatalf("observed text lost: %q", text)
 	}
 }
