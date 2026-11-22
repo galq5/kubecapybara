@@ -6,6 +6,7 @@ import (
 	"maps"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -164,7 +165,9 @@ func (c *voipCollector) learnCodecs(s *sipparse.SDP) {
 
 func (c *voipCollector) Collect(w *Window) {
 	now := monoNow()
+	pods := c.a.resolver.Pods()
 	c.mu.Lock()
+	c.sip.forget(func(entity string) bool { return podAlive(pods, entity) })
 	cur, evs := c.sip.collect(now)
 	// the reader goroutine adds codecs learned from SDP under c.mu
 	codecs := maps.Clone(c.codecs)
@@ -490,6 +493,47 @@ func (t *sipTracker) handle(entity, peer string, ts uint64, egress bool, m *sipp
 		}
 	}
 	return nil
+}
+
+// forget drops the calls and open transactions of entities that are gone:
+// a pod deleted mid-call never sends its BYE, and its calls would count as
+// active until sipCallMaxAge (its transactions would time out as failures).
+func (t *sipTracker) forget(alive func(entity string) bool) {
+	known := map[string]bool{}
+	ok := func(entity string) bool {
+		v, seen := known[entity]
+		if !seen {
+			v = alive(entity)
+			known[entity] = v
+		}
+		return v
+	}
+	for k, c := range t.calls {
+		if !ok(c.entity) {
+			delete(t.calls, k)
+		}
+	}
+	for k := range t.pending {
+		if !ok(k.entity) {
+			delete(t.pending, k)
+		}
+	}
+}
+
+// podAlive reports whether an entity may still exist: a pod is gone when
+// its cgroup is (pods: Resolver.Pods, which may predate the deletion).
+// Host and unresolved entities have no lifecycle to check.
+func podAlive(pods map[string]string, entity string) bool {
+	uid, isPod := strings.CutPrefix(entity, "pod:")
+	if !isPod {
+		return true
+	}
+	dir, ok := pods[uid]
+	if !ok {
+		return false
+	}
+	_, err := os.Stat(dir)
+	return err == nil
 }
 
 // collect returns the interval's stats and timeout events and resets.

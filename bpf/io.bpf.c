@@ -13,6 +13,7 @@
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 #define REQ_OP_MASK 0xff
+#define REQ_OP_READ 0
 #define REQ_OP_WRITE 1
 
 struct bio_start {
@@ -69,11 +70,21 @@ int BPF_PROG(on_bio_queue, struct bio *bio)
 {
 	__u64 key = (__u64)bio;
 	struct bio_start st = {};
+	__u32 op = BPF_CORE_READ(bio, bi_opf) & REQ_OP_MASK;
 
+	/*
+	 * Data reads and writes only. A discard, secure erase or write-zeroes
+	 * bio names a whole range without transferring it (counted as a read,
+	 * an fstrim added the size of every trimmed range to the read bytes),
+	 * and zone management carries no data. Zone appends (zoned devices
+	 * only, numbered differently across kernels) are left out as well.
+	 */
+	if (op != REQ_OP_READ && op != REQ_OP_WRITE)
+		return 0;
 	st.ts = bpf_ktime_get_ns();
 	st.cgroup = bpf_get_current_cgroup_id();
 	st.bytes = BPF_CORE_READ(bio, bi_iter.bi_size);
-	st.write = (BPF_CORE_READ(bio, bi_opf) & REQ_OP_MASK) == REQ_OP_WRITE;
+	st.write = op == REQ_OP_WRITE;
 	bpf_map_update_elem(&bios, &key, &st, BPF_ANY);
 	return 0;
 }

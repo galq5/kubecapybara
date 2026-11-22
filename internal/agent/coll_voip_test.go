@@ -1,9 +1,12 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/galq5/kubecapybara/internal/cgroups"
 	"github.com/galq5/kubecapybara/internal/model"
 	"github.com/galq5/kubecapybara/internal/sipparse"
 )
@@ -178,5 +181,59 @@ func TestRTPStatsOneWay(t *testing.T) {
 	}
 	if agg.StreamsOut != 2 || agg.Lost != 20 {
 		t.Fatalf("merged %+v", agg)
+	}
+}
+
+// A pod deleted mid-call sends no BYE: its calls stop counting as active
+// (they did for 12 hours) and its open transactions do not time out.
+func TestSIPCallsOfGonePodsAreForgotten(t *testing.T) {
+	tr := newSIPTracker()
+	for _, pod := range []string{"pod:gone", "pod:live"} {
+		tr.handle(pod, "10.0.0.9", 0, true, sipReq("INVITE", "c1", 1))
+		tr.handle(pod, "10.0.0.9", 100*ms, false, sipResp(200, "INVITE", "c1", 1))
+		tr.handle(pod, "10.0.0.9", 101*ms, true, sipReq("ACK", "c1", 1))
+	}
+	tr.handle("pod:gone", "10.0.0.9", 200*ms, true, sipReq("INVITE", "c2", 1)) // never answered
+	cur, _ := tr.collect(uint64(time.Second))
+	if cur["pod:gone"].CallsActive != 1 || cur["pod:live"].CallsActive != 1 {
+		t.Fatalf("calls before the deletion: %+v %+v", cur["pod:gone"], cur["pod:live"])
+	}
+
+	tr.forget(func(e string) bool { return e != "pod:gone" })
+	cur, evs := tr.collect(uint64(time.Minute))
+	g := cur["pod:gone"]
+	if g == nil || g.CallsActive != 0 {
+		t.Fatalf("gone pod: %+v, want zero active calls reported once", g)
+	}
+	if inv := g.Methods["uac INVITE"]; len(evs) != 0 || inv != nil && inv.Timeouts != 0 {
+		t.Fatalf("the deleted pod's INVITE timed out: %v %+v", evs, inv)
+	}
+	if cur["pod:live"].CallsActive != 1 {
+		t.Fatalf("live pod lost its call: %+v", cur["pod:live"])
+	}
+	if cur, _ = tr.collect(uint64(2 * time.Minute)); cur["pod:gone"] != nil {
+		t.Fatalf("gone pod still reported: %+v", cur["pod:gone"])
+	}
+}
+
+// A pod is gone when its cgroup is, even before the resolver rescans.
+func TestPodAlive(t *testing.T) {
+	root := t.TempDir()
+	const dir = "/kubepods/pod11111111-2222-3333-4444-555555555555"
+	if err := os.MkdirAll(filepath.Join(root, dir, "c1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pods := cgroups.NewResolver(root).Pods()
+	if !podAlive(pods, "pod:11111111-2222-3333-4444-555555555555") || !podAlive(pods, "host:/system.slice") || !podAlive(pods, "cg:42") {
+		t.Fatal("live pod, host and unresolved entities are alive")
+	}
+	if podAlive(pods, "pod:99999999-2222-3333-4444-555555555555") {
+		t.Fatal("a pod the resolver does not know is gone")
+	}
+	if err := os.RemoveAll(filepath.Join(root, dir)); err != nil {
+		t.Fatal(err)
+	}
+	if podAlive(pods, "pod:11111111-2222-3333-4444-555555555555") {
+		t.Fatal("a pod whose cgroup was removed is gone")
 	}
 }
